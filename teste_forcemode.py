@@ -5,9 +5,8 @@ print("RTDE Receive importado...")
 import time
 print("time importado...")
 
-IP = "10.104.11.77"  # IP do robô
-IP2 = "10.104.11.77"
-print("IP setado em: 10.104.11.77")
+IP = "10.104.11.71"  # IP da UR3e
+IP2 = "10.104.11.99" # IP da Ur5e
 
 cont_ur3 = rtde_control.RTDEControlInterface(IP)
 print("Conexão com UR3e estabelecida!")
@@ -38,10 +37,11 @@ try:
         print("Lista de força ajustada: ", lista_forca)
         cont_ur3.forceMode(
             pose_tcp,                 # Referencial: tcp
-            [1, 1, 1, 1, 1, 1],       # Eixos complacentes
-            [0,0,0,0,0,0],              # Força nula
+            [1, 1, 1, 0, 0, 0],       # Eixos complacentes
+            # [0,0,0,0,0,0],              # Força nula
+            lista_forca,              # Força nula
             2,                        # Referencial inalterado
-            [0.5, 0.5, 0.5, 0.2, 0.2, 0.2]
+            [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
         )
 
         time.sleep(0.01)

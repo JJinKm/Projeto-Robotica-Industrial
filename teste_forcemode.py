@@ -39,7 +39,7 @@ try:
         cont_ur3.forceMode(
             pose_tcp,                 # Referencial: tcp
             [1, 1, 1, 1, 1, 1],       # Eixos complacentes
-            lista_forca,              # Força nula
+            [0,0,0,0,0,0],              # Força nula
             2,                        # Referencial inalterado
             [0.5, 0.5, 0.5, 0.2, 0.2, 0.2]
         )

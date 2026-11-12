@@ -4,6 +4,78 @@ import time
 import threading
 import math
 from scipy.spatial.transform import Rotation
+import time
+import serial
+import minimalmodbus
+
+garra = minimalmodbus.Instrument(
+    "COM3", 9, mode=minimalmodbus.MODE_RTU
+)
+
+garra.serial.baudrate = 115200
+garra.serial.bytesize = 8
+garra.serial.parity = serial.PARITY_NONE
+garra.serial.stopbits = 1
+garra.serial.timeout = 0.5
+garra.serial.write_timeout = 0.5
+
+
+def ler_estado():
+    # FC04: lê os três registradores de estado
+    r = garra.read_registers(2000, 3, functioncode=4)
+    status = r[0] >> 8
+
+    return {
+        "ativa": bool(status & 1),
+        "ativacao": (status >> 4) & 3,
+        "movimento": (status >> 6) & 3,
+        "falha": (r[1] >> 8) & 0x0F,
+        "pedido": r[1] & 0xFF,
+        "posicao": r[2] >> 8,
+    }
+
+
+def esperar(condicao, timeout=0.10):
+    inicio = time.monotonic()
+
+    while time.monotonic() - inicio < timeout:
+        estado = 1
+    estado = ler_estado()
+    return estado
+
+def atualizar_botao(apertado):
+    posicao = 250 if apertado else 100
+    return posicao
+
+def ativar():
+    estado = ler_estado()
+
+    if estado["ativa"] and estado["ativacao"] == 3:
+        return
+
+    # Reset e confirmação
+    garra.write_registers(1000, [0x0000, 0, 0])
+    esperar(lambda e: not e["ativa"] and e["ativacao"] == 0)
+
+    # rACT = 1
+    garra.write_registers(1000, [0x0100, 0, 0])
+    esperar(lambda e: e["ativa"] and e["ativacao"] == 3)
+
+
+def mover(posicao, garra_moving, velocidade=50, forca=30):
+    if not all(0 <= v <= 255 for v in (posicao, velocidade, forca)):
+        raise ValueError("Os valores devem estar entre 0 e 255.")
+
+    # rACT=1, rGTO=1; posição; velocidade e força
+    if garra_moving == 0:
+        garra.write_registers(1000, [0x0900, posicao, (velocidade << 8) | forca])
+        return 1
+
+    # time.sleep(0.1)
+    # return esperar(
+    #     lambda e: e["pedido"] == posicao and e["movimento"] != 0
+    # )
+
 
 
 flags = RTDEControl.FLAG_UPLOAD_SCRIPT | RTDEControl.FLAG_VERBOSE
@@ -42,6 +114,14 @@ vel_anterior = 0.0
 
 joint_follow = rtde_follow_r.getActualQ()
 
+estado = {}
+garra_close = 0
+garra_moving = 0
+
+ativar()
+mover(100,0)
+time.sleep(0.1)
+
 try:
 
     while not parar.is_set():
@@ -63,6 +143,20 @@ try:
         
         erro = [abs(a_f - a_m) for a_f,a_m in zip(a_base_f,a_base_m)]
 
+        posicao = atualizar_botao(rtde_master_r.getDigitalInState(16))
+
+        if posicao == 250 and garra_close == 0:
+            garra_moving = mover(posicao,garra_moving)
+            if garra_close == 0:
+                garra_moving = 0
+            garra_close = 1
+        elif posicao == 100 and garra_close == 1:
+            garra_moving = mover(posicao,garra_moving)
+            if garra_close == 1:
+                garra_moving = 0
+            garra_close = 0
+
+
         # if (abs(a_base_m[0]) > 0.9 or abs(a_base_m[1]) > 0.9 or abs(a_base_m[2]) > 10):
         #     print("Garra em movimento")
         #     print(a_base_f)
@@ -75,14 +169,18 @@ try:
         joint_follow = rtde_follow_r.getActualQ()
         joint_master = rtde_master_r.getActualQ()
 
-        if any(e < 0.5 for e in erro):
-            rtde_follow_c.servoJ(joint_master, 0, 0, dt, lookahead_time, gain)
-        else:
-            print("Entrou no if")
+        # if any(e < 0.5 for e in erro):
+            
+        rtde_follow_c.servoJ(joint_master, 0, 0, dt, lookahead_time, gain)
+        
+        # else:
+        #     print("Entrou no if")
         
         rtde_follow_c.waitPeriod(t_start)
 
 finally:
+    garra.serial.close()
+
     rtde_follow_c.servoStop()
     rtde_master_c.endTeachMode()
 
@@ -93,16 +191,3 @@ finally:
     rtde_follow_c.disconnect()
 
 print("Programa encerrado")
-
-
-# Get the current TCP pose [x, y, z, rx, ry, rz]
-# tcp_pose = rtde_r_.getActualTCPPose()
-# print("TCP position (m):            ", tcp_pose[:3])
-# print("TCP orientation (axis-angle):", tcp_pose[3:])
-
-# rtde_io_.setStandardDigitalOut(0,True)
-
-# if rtde_r_.getDigitalOutState(16):
-#     print("Tool digital out (16) is HIGH")
-# else:
-#     print("Tool digital out (16) is LOW")

@@ -9,7 +9,7 @@ import serial
 import minimalmodbus
 
 garra = minimalmodbus.Instrument(
-    "COM3", 9, mode=minimalmodbus.MODE_RTU
+    "COM4", 9, mode=minimalmodbus.MODE_RTU
 )
 
 garra.serial.baudrate = 115200
@@ -18,6 +18,7 @@ garra.serial.parity = serial.PARITY_NONE
 garra.serial.stopbits = 1
 garra.serial.timeout = 0.5
 garra.serial.write_timeout = 0.5
+garra.clear_buffers_before_each_transaction = True
 
 
 def ler_estado():
@@ -33,6 +34,33 @@ def ler_estado():
         "pedido": r[1] & 0xFF,
         "posicao": r[2] >> 8,
     }
+
+
+def conectar_garra(timeout=30, estavel=8.0):
+    # A garra fala pela COM da Wrist Camera, que às vezes reinicia o USB
+    # alguns segundos depois da porta ser aberta. Fica lendo (e reabrindo a
+    # porta se ela sumir) até a comunicação ficar estável por `estavel` s.
+    inicio = time.monotonic()
+    ok_desde = None
+    while time.monotonic() - inicio < timeout:
+        try:
+            if not garra.serial.is_open:
+                garra.serial.open()
+                time.sleep(0.3)
+            ler_estado()
+            if ok_desde is None:
+                ok_desde = time.monotonic()
+            elif time.monotonic() - ok_desde >= estavel:
+                return
+        except (serial.SerialException, minimalmodbus.ModbusException, OSError):
+            ok_desde = None
+            try:
+                garra.serial.close()
+            except Exception:
+                pass
+            time.sleep(0.5)
+        time.sleep(0.05)
+    raise RuntimeError("Garra não respondeu de forma estável na porta serial")
 
 
 def esperar(condicao, timeout=0.10):
@@ -100,7 +128,71 @@ joint_home = [-1.57, -1.57, -1.57, -1.57, 1.57,0]
 rtde_master_c.moveJ(joint_home,1.5,0.5)
 rtde_follow_c.moveJ(joint_home,1.5,0.5)
 print("Robôs em posição inicial")
-rtde_master_c.teachMode()
+
+# --- Modo de guiar o leader ---------------------------------------------
+# "forca": force mode nativo do UR no leader, com força alvo zero em todos os
+#          eixos. O controlador move o robô na direção da força que você aplica
+#          na ferramenta (sensor F/T do UR3e) e NÃO trata isso como colisão.
+#          Só sente força aplicada DEPOIS do sensor (ferramenta/flange).
+# "teach": freedrive normal do UR (comportamento antigo).
+MODO_GUIA = "forca"
+
+AMORTECIMENTO = 0.02  # 0..1  maior = para mais rápido ao soltar; menor = "desliza" (inércia)
+GANHO_FORCA = 2.0     # 0..2  maior = responde mais rápido ao empurrão (>1 pode oscilar)
+VMAX_LIN = 0.25       # m/s   velocidade máx. nos eixos lineares
+VMAX_ROT = 0.8        # rad/s velocidade máx. nos eixos de rotação
+DEBUG_FORCA = True    # imprime força lida 2x/s
+
+# --- Reflexão de força (follower -> leader) -------------------------------
+# O UR5 (CB3) não tem sensor de força, mas estima a força no TCP pelas
+# correntes dos motores (getActualTCPForce). Essa estimativa é ruidosa
+# (~15-40 N parado), mas um contato firme passa de 100 N. O que passar da
+# zona morta é aplicado no leader, NA MESMA DIREÇÃO em que o ambiente empurra
+# o follower (ex.: mesa empurra o follower p/ cima -> leader empurra a mão p/
+# cima). Sinal validado: empurrar o follower p/ baixo deu F_z negativo.
+REFLEXAO = True
+K_REFLEXAO = 0.1           # N no leader por N no follower
+ZONA_MORTA_REFLEXAO = 30.0 # N   abaixo disso é ruído da estimativa do CB3
+FMAX_REFLEXAO = 10.0       # N   força máxima aplicada no leader
+ALFA_REFLEXAO = 0.1        # filtro (0..1, menor = mais suave, mais atraso)
+T_CALIBRACAO = 1.5         # s   tempo p/ medir o viés com o follower servoando
+
+
+def forca_reflexao(f_filt, vies):
+    f = [a - b for a, b in zip(rtde_follow_r.getActualTCPForce()[:3], vies)]
+    f_filt = [(1 - ALFA_REFLEXAO) * a + ALFA_REFLEXAO * b for a, b in zip(f_filt, f)]
+    norma = math.sqrt(sum(x * x for x in f_filt))
+    mag = min(K_REFLEXAO * max(norma - ZONA_MORTA_REFLEXAO, 0.0), FMAX_REFLEXAO)
+    w = [mag * x / norma for x in f_filt] if mag > 0 else [0.0, 0.0, 0.0]
+    return w, f_filt, norma
+
+
+def passo_forca(w_lin=(0.0, 0.0, 0.0), f_follower=0.0):
+    ok = rtde_master_c.forceMode(
+        [0, 0, 0, 0, 0, 0],                 # referencial: base
+        [1, 1, 1, 1, 1, 1],                 # todos os eixos complacentes
+        list(w_lin) + [0.0, 0.0, 0.0],      # força alvo = reflexão (torque zero)
+        2,                                  # referencial não transformado
+        [VMAX_LIN] * 3 + [VMAX_ROT] * 3,    # limites de velocidade
+    )
+    global ultimo_debug
+    if DEBUG_FORCA and time.monotonic() - ultimo_debug > 0.5:
+        ultimo_debug = time.monotonic()
+        f = rtde_master_r.getActualTCPForce()
+        print("F_leader=[" + " ".join(f"{x:6.1f}" for x in f[:3]) + "]  "
+              f"|F_follower|={f_follower:6.1f} N  "
+              "F_reflexao=[" + " ".join(f"{x:5.1f}" for x in w_lin) + f"]  ok={ok}")
+
+
+ultimo_debug = 0.0
+f_filt = [0.0, 0.0, 0.0]
+vies_follower = None
+amostras_vies = []
+t_inicio_loop = None
+
+
+if MODO_GUIA == "teach":
+    rtde_master_c.teachMode()
 
 m = 1 # Massa da garra [kg]
 
@@ -118,9 +210,23 @@ estado = {}
 garra_close = 0
 garra_moving = 0
 
+conectar_garra()
 ativar()
 mover(100,0)
 time.sleep(0.1)
+
+if MODO_GUIA == "forca":
+    # Zera o sensor com o leader parado e sem ninguém encostando
+    print("Zerando sensor de força do leader, não encoste no robô...")
+    time.sleep(0.5)
+    rtde_master_c.zeroFtSensor()
+    time.sleep(0.2)
+    rtde_master_c.forceModeSetDamping(AMORTECIMENTO)
+    rtde_master_c.forceModeSetGainScaling(GANHO_FORCA)
+    print("Leader em force mode: pode guiar pela ferramenta")
+    if REFLEXAO:
+        print(f"Calibrando força do follower por {T_CALIBRACAO} s: "
+              "não encoste no follower...")
 
 try:
 
@@ -171,6 +277,31 @@ try:
 
         # if any(e < 0.5 for e in erro):
             
+        if MODO_GUIA == "forca":
+            if REFLEXAO and vies_follower is None:
+                # Mede o viés da estimativa com o follower já servoando
+                if t_inicio_loop is None:
+                    t_inicio_loop = time.monotonic()
+                amostras_vies.append(rtde_follow_r.getActualTCPForce()[:3])
+                if time.monotonic() - t_inicio_loop >= T_CALIBRACAO:
+                    n = len(amostras_vies)
+                    vies_follower = [sum(a[i] for a in amostras_vies) / n for i in range(3)]
+                    print("Viés do follower: [" +
+                          " ".join(f"{x:6.1f}" for x in vies_follower) +
+                          "] N. Reflexão de força ATIVA.")
+                passo_forca()
+            elif REFLEXAO:
+                w_ref, f_filt, f_mag = forca_reflexao(f_filt, vies_follower)
+                passo_forca(w_ref, f_mag)
+            else:
+                passo_forca()
+
+        # Se o script de algum robô morreu (ex.: protective stop), para tudo
+        if not (rtde_master_c.isProgramRunning() and rtde_follow_c.isProgramRunning()):
+            print("Script de controle parou em um dos robôs "
+                  "(protective stop?). Encerrando.")
+            break
+
         rtde_follow_c.servoJ(joint_master, 0, 0, dt, lookahead_time, gain)
         
         # else:
@@ -182,7 +313,10 @@ finally:
     garra.serial.close()
 
     rtde_follow_c.servoStop()
-    rtde_master_c.endTeachMode()
+    if MODO_GUIA == "forca":
+        rtde_master_c.forceModeStop()
+    else:
+        rtde_master_c.endTeachMode()
 
     rtde_follow_c.stopScript()
     rtde_master_c.stopScript()

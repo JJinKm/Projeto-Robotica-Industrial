@@ -108,7 +108,17 @@ def mover(posicao, garra_moving, velocidade=50, forca=30):
 
     # rACT=1, rGTO=1; posição; velocidade e força
     if garra_moving == 0:
-        garra.write_registers(1000, [0x0900, posicao, (velocidade << 8) | forca])
+        # O link serial passa pela câmera do punho e às vezes devolve a resposta
+        # corrompida (InvalidResponseError / checksum), principalmente com
+        # comandos em sequência rápida. O comando é idempotente, então repete.
+        for tentativa in range(3):
+            try:
+                garra.write_registers(1000, [0x0900, posicao, (velocidade << 8) | forca])
+                break
+            except (minimalmodbus.ModbusException, serial.SerialException, OSError) as e:
+                time.sleep(0.03)
+                if tentativa == 2:
+                    print(f"Aviso: garra não confirmou o comando ({type(e).__name__}); seguindo.")
         return 1
 
     # time.sleep(0.1)
@@ -222,6 +232,10 @@ estado = {}
 garra_close = 0
 garra_moving = 0
 
+teachmode_flag = 0
+F_ENTRA_FORCE = 1.9   # N  acima disso o leader sai do teach mode e vai p/ force mode
+F_SAI_FORCE = 0.5     # N  abaixo disso o leader volta p/ teach mode
+
 conectar_garra()
 ativar()
 mover(100,0)
@@ -304,12 +318,20 @@ try:
                 passo_forca()
             elif REFLEXAO:
                 w_ref, f_filt, f_mag = forca_reflexao(f_filt, vies_follower)
-                if math.sqrt(sum(x*x for x in rtde_master_r.getActualTCPForce()[:3])) > 1:
-                    rtde_master_c.endTeachMode()
-                    passo_forca(w_ref, f_mag)
-                else:
+                f_lider = math.sqrt(sum(x*x for x in rtde_master_r.getActualTCPForce()[:3]))
+                # Histerese: entra em force mode acima de F_ENTRA_FORCE e só volta
+                # ao teach mode abaixo de F_SAI_FORCE, evitando trocar de modo
+                # várias vezes por segundo quando a força oscila perto do limiar.
+                if teachmode_flag:
+                    if f_lider > F_ENTRA_FORCE:
+                        rtde_master_c.endTeachMode()
+                        teachmode_flag = 0
+                elif f_lider < F_SAI_FORCE:
                     rtde_master_c.forceModeStop()
                     rtde_master_c.teachMode()
+                    teachmode_flag = 1
+                if not teachmode_flag:
+                    passo_forca(w_ref, f_mag)
             else:
                 passo_forca()
 
@@ -332,6 +354,8 @@ finally:
     rtde_follow_c.servoStop()
     if MODO_GUIA == "forca":
         rtde_master_c.forceModeStop()
+        rtde_master_c.endTeachMode()
+
     else:
         rtde_master_c.endTeachMode()
 

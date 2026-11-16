@@ -72,8 +72,20 @@ def esperar(condicao, timeout=0.10):
     return estado
 
 def atualizar_botao(apertado):
+    global garra_moving
+    global garra_close
     posicao = 250 if apertado else 100
-    return posicao
+    if posicao == 250 and garra_close == 0:
+        garra_moving = mover(posicao,garra_moving)
+        if garra_close == 0:
+            garra_moving = 0
+        garra_close = 1
+    elif posicao == 100 and garra_close == 1:
+        garra_moving = mover(posicao,garra_moving)
+        if garra_close == 1:
+            garra_moving = 0
+        garra_close = 0
+
 
 def ativar():
     estado = ler_estado()
@@ -137,9 +149,9 @@ print("Robôs em posição inicial")
 # "teach": freedrive normal do UR (comportamento antigo).
 MODO_GUIA = "forca"
 
-AMORTECIMENTO = 0.02  # 0..1  maior = para mais rápido ao soltar; menor = "desliza" (inércia)
-GANHO_FORCA = 2.0     # 0..2  maior = responde mais rápido ao empurrão (>1 pode oscilar)
-VMAX_LIN = 0.25       # m/s   velocidade máx. nos eixos lineares
+AMORTECIMENTO = 0.015  # 0..1  maior = para mais rápido ao soltar; menor = "desliza" (inércia) 0.02
+GANHO_FORCA = 2.0     # 0..2  maior = responde mais rápido ao empurrão (>1 pode oscilar) 2.0
+VMAX_LIN = 0.25       # m/s   velocidade máx. nos eixos lineares 0.25
 VMAX_ROT = 0.8        # rad/s velocidade máx. nos eixos de rotação
 DEBUG_FORCA = True    # imprime força lida 2x/s
 
@@ -251,16 +263,16 @@ try:
 
         posicao = atualizar_botao(rtde_master_r.getDigitalInState(16))
 
-        if posicao == 250 and garra_close == 0:
-            garra_moving = mover(posicao,garra_moving)
-            if garra_close == 0:
-                garra_moving = 0
-            garra_close = 1
-        elif posicao == 100 and garra_close == 1:
-            garra_moving = mover(posicao,garra_moving)
-            if garra_close == 1:
-                garra_moving = 0
-            garra_close = 0
+        # if posicao == 250 and garra_close == 0:
+        #     garra_moving = mover(posicao,garra_moving)
+        #     if garra_close == 0:
+        #         garra_moving = 0
+        #     garra_close = 1
+        # elif posicao == 100 and garra_close == 1:
+        #     garra_moving = mover(posicao,garra_moving)
+        #     if garra_close == 1:
+        #         garra_moving = 0
+        #     garra_close = 0
 
 
         # if (abs(a_base_m[0]) > 0.9 or abs(a_base_m[1]) > 0.9 or abs(a_base_m[2]) > 10):
@@ -292,7 +304,12 @@ try:
                 passo_forca()
             elif REFLEXAO:
                 w_ref, f_filt, f_mag = forca_reflexao(f_filt, vies_follower)
-                passo_forca(w_ref, f_mag)
+                if math.sqrt(sum(x*x for x in rtde_master_r.getActualTCPForce()[:3])) > 1:
+                    rtde_master_c.endTeachMode()
+                    passo_forca(w_ref, f_mag)
+                else:
+                    rtde_master_c.forceModeStop()
+                    rtde_master_c.teachMode()
             else:
                 passo_forca()
 

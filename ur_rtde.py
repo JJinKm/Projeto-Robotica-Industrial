@@ -9,7 +9,7 @@ import serial
 import minimalmodbus
 
 garra = minimalmodbus.Instrument(
-    "COM4", 9, mode=minimalmodbus.MODE_RTU
+    "COM3", 9, mode=minimalmodbus.MODE_RTU
 )
 
 garra.serial.baudrate = 115200
@@ -231,9 +231,10 @@ joint_follow = rtde_follow_r.getActualQ()
 estado = {}
 garra_close = 0
 garra_moving = 0
+f_mag = 0
 
 teachmode_flag = 0
-F_ENTRA_FORCE = 1.9   # N  acima disso o leader sai do teach mode e vai p/ force mode
+F_ENTRA_FORCE = 1.6   # N  acima disso o leader sai do teach mode e vai p/ force mode
 F_SAI_FORCE = 0.5     # N  abaixo disso o leader volta p/ teach mode
 
 conectar_garra()
@@ -259,21 +260,21 @@ try:
     while not parar.is_set():
         t_start = rtde_follow_c.initPeriod()
 
-        aceleracao_master = rtde_master_r.getActualToolAccelerometer()
-        aceleracao_follow = rtde_follow_r.getActualToolAccelerometer()
+        # aceleracao_master = rtde_master_r.getActualToolAccelerometer()
+        # aceleracao_follow = rtde_follow_r.getActualToolAccelerometer()
 
-        pose_tcp_m = rtde_master_r.getActualTCPPose()
-        pose_tcp_f = rtde_follow_r.getActualTCPPose()
+        # pose_tcp_m = rtde_master_r.getActualTCPPose()
+        # pose_tcp_f = rtde_follow_r.getActualTCPPose()
 
-        R_base_tcp_m = Rotation.from_rotvec(pose_tcp_m[3:]).as_matrix()
-        R_base_tcp_f = Rotation.from_rotvec(pose_tcp_f[3:]).as_matrix()
+        # R_base_tcp_m = Rotation.from_rotvec(pose_tcp_m[3:]).as_matrix()
+        # R_base_tcp_f = Rotation.from_rotvec(pose_tcp_f[3:]).as_matrix()
 
-        a_base_m = R_base_tcp_m @ aceleracao_master
-        a_base_f = R_base_tcp_f @ aceleracao_follow
+        # a_base_m = R_base_tcp_m @ aceleracao_master
+        # a_base_f = R_base_tcp_f @ aceleracao_follow
 
-        a_base_f[2] = a_base_f[2] - 1.9
+        # a_base_f[2] = a_base_f[2] - 1.9
         
-        erro = [abs(a_f - a_m) for a_f,a_m in zip(a_base_f,a_base_m)]
+        # erro = [abs(a_f - a_m) for a_f,a_m in zip(a_base_f,a_base_m)]
 
         posicao = atualizar_botao(rtde_master_r.getDigitalInState(16))
 
@@ -322,16 +323,23 @@ try:
                 # Histerese: entra em force mode acima de F_ENTRA_FORCE e só volta
                 # ao teach mode abaixo de F_SAI_FORCE, evitando trocar de modo
                 # várias vezes por segundo quando a força oscila perto do limiar.
-                if teachmode_flag:
-                    if f_lider > F_ENTRA_FORCE:
+                w_lider = math.sqrt(sum(x*x for x in w_ref))
+                
+                if f_lider > F_ENTRA_FORCE:
+                    if teachmode_flag:    
                         rtde_master_c.endTeachMode()
                         teachmode_flag = 0
-                elif f_lider < F_SAI_FORCE:
-                    rtde_master_c.forceModeStop()
-                    rtde_master_c.teachMode()
-                    teachmode_flag = 1
-                if not teachmode_flag:
                     passo_forca(w_ref, f_mag)
+                elif f_lider < F_SAI_FORCE:
+                    if not teachmode_flag:
+                        rtde_master_c.forceModeStop()
+                        rtde_master_c.teachMode()
+                        teachmode_flag = 1
+                else:
+                    if not teachmode_flag:
+                        rtde_master_c.forceModeStop()
+                        rtde_master_c.teachMode()
+                        teachmode_flag = 1
             else:
                 passo_forca()
 
@@ -340,6 +348,7 @@ try:
             print("Script de controle parou em um dos robôs "
                   "(protective stop?). Encerrando.")
             break
+
 
         rtde_follow_c.servoJ(joint_master, 0, 0, dt, lookahead_time, gain)
         

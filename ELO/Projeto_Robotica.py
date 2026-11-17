@@ -66,6 +66,7 @@ QPushButton#nav:hover { background:#1B3D50; color:white; }
 QPushButton#nav:checked { background:#D9F3EE; color:#11675B; }
 QPushButton#primary { background:#167F73; color:white; border:0; }
 QPushButton#primary:hover { background:#126D64; }
+QPushButton#demo { background:#E2F4EF; color:#11675B; border:1px solid #C9E8DE; }
 QPushButton#heroButton { background:white; color:#125D63; border:0; border-radius:11px; padding:12px 17px; font-weight:700; }
 QPushButton#heroButton:hover { background:#E8F8F4; }
 QPushButton#tileButton { text-align:left; background:transparent; border:0; color:#147365; padding:4px 0; }
@@ -106,13 +107,18 @@ class ELO(QWidget):
         self.t = 0.0
         self.speed = 50
         self.scale = 1.0
+        # gPO do Robotiq: 0 = aberta, 255 = fechada. Na demo, o botão
+        # abaixo controla apenas o modelo 3D e não envia comandos à garra.
+        self.gripper_position = 255
+        self.gripper_target = 255
+        self.gripper_previous_position = 255
         self.positions = {
             "UR3e": [180.0, -120.0, 250.0, 0.0, 3.142, 0.0],
             "UR5e": [350.0, -180.0, 400.0, 0.0, 3.142, 0.0],
         }
         self.joint_angles = {
-            "UR3e": [0.0, -90.0, -90.0, -90.0, 90.0, 0.0],
-            "UR5e": [0.0, -90.0, -90.0, -90.0, 90.0, 0.0],
+            "UR3e": [0.0, -90.0, 0.0, -90.0, 0.0, 0.0],
+            "UR5e": [0.0, -90.0, 0.0, -90.0, 0.0, 0.0],
         }
         self.wrenches = {
             "UR3e": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -422,10 +428,14 @@ class ELO(QWidget):
         self.connect_button = QPushButton("Conectar para ler medidas")
         self.connect_button.setObjectName("primary")
         self.connect_button.clicked.connect(self.connect_telemetry)
+        self.demo_button = QPushButton("Testar demo 3D")
+        self.demo_button.setObjectName("demo")
+        self.demo_button.clicked.connect(self.start_demo)
         self.disconnect_button = QPushButton("Desconectar")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_telemetry)
         action_row.addWidget(self.connect_button)
+        action_row.addWidget(self.demo_button)
         action_row.addWidget(self.disconnect_button)
         self.telemetry_status = label("Desconectado • exibindo dados simulados", "badge")
         action_row.addWidget(self.telemetry_status, 1)
@@ -451,6 +461,17 @@ class ELO(QWidget):
             "Modelos 3D manipuláveis • arraste para girar • roda do mouse para aproximar • arraste a divisória para redimensionar",
             "muted",
         ))
+
+        gripper_demo_row = QHBoxLayout()
+        self.gripper_demo_button = QPushButton("Segure para abrir a garra (demo)")
+        self.gripper_demo_button.setObjectName("demo")
+        self.gripper_demo_button.setEnabled(False)
+        self.gripper_demo_button.pressed.connect(self.open_demo_gripper)
+        self.gripper_demo_button.released.connect(self.close_demo_gripper)
+        gripper_demo_row.addWidget(self.gripper_demo_button)
+        self.gripper_state_label = label("Garra do UR5e: fechada • demonstração", "badge")
+        gripper_demo_row.addWidget(self.gripper_state_label, 1)
+        visual_layout.addLayout(gripper_demo_row)
 
         self.expanded_camera = None
         self.view_splitter = QSplitter(Qt.Vertical)
@@ -622,6 +643,27 @@ class ELO(QWidget):
         self.set_state("Simulação em andamento")
         self.add_log("Simulação iniciada")
 
+    def start_demo(self):
+        """Inicia a animação simulada sem tentar abrir comunicação com robôs."""
+        if self.telemetry_source is not None:
+            self.disconnect_telemetry("Demonstração ativa • sem conexão com robôs")
+        self.t = 0.0
+        self.running = True
+        self.paused = False
+        self.gripper_position = 255
+        self.gripper_target = 255
+        self.gripper_previous_position = 255
+        self.gripper_demo_button.setEnabled(True)
+        self.refresh_gripper_state("Demonstração")
+        self.update_simulation()
+        self.set_state("Demonstração em andamento")
+        self.telemetry_status.setText("Demonstração ativa • dados simulados • sem robôs")
+        for source_label in self.source_labels:
+            source_label.setText("Demonstração • dados simulados")
+        for status_label in self.status_labels:
+            status_label.setText("Movimento: simulado")
+        self.add_log("Modo demonstração iniciado; nenhum robô foi conectado")
+
     def pause(self):
         if self.telemetry_source is not None:
             self.operation_info.setText(
@@ -697,6 +739,10 @@ class ELO(QWidget):
             source.read()  # valida a leitura inicial antes de mudar o estado da UI
             self.set_telemetry_source(source)
             self.disconnect_button.setEnabled(True)
+            self.gripper_demo_button.setEnabled(False)
+            self.gripper_state_label.setText(
+                "Garra: gPO não disponível na leitura RTDE atual"
+            )
             self.telemetry_status.setText("Conectado • telemetria real, somente leitura")
             for source_label in self.source_labels:
                 source_label.setText("RTDE • leitura real, somente leitura")
@@ -718,6 +764,13 @@ class ELO(QWidget):
             self.connect_button.setEnabled(True)
             self.disconnect_button.setEnabled(False)
             self.telemetry_status.setText(status)
+            self.gripper_demo_button.setEnabled(self.running)
+            if self.running:
+                self.refresh_gripper_state("Demonstração")
+            else:
+                self.gripper_state_label.setText(
+                    "Garra: estado simulado • inicie a demo para testar"
+                )
             for source_label in self.source_labels:
                 source_label.setText("Dados simulados • modo demonstração")
             for status_label in self.status_labels:
@@ -736,6 +789,7 @@ class ELO(QWidget):
             400 + self.scale * dz,
         ]
         self.update_simulated_feedback()
+        self.advance_demo_gripper()
 
     def update_from_telemetry(self):
         """Atualiza a interface com uma fonte RTDE somente de leitura."""
@@ -746,6 +800,41 @@ class ELO(QWidget):
             pose = sample.tcp_pose_m_rad
             self.positions[name] = [pose[0] * 1000, pose[1] * 1000, pose[2] * 1000, *pose[3:]]
             self.wrenches[name] = list(sample.tcp_wrench_n_nm)
+
+    def open_demo_gripper(self):
+        """Botão pressionado: abre a garra apenas na demonstração 3D."""
+        if not self.running or self.telemetry_source is not None:
+            return
+        self.gripper_target = 0
+
+    def close_demo_gripper(self):
+        """Botão solto: fecha a garra apenas na demonstração 3D."""
+        if not self.running or self.telemetry_source is not None:
+            return
+        self.gripper_target = 255
+
+    def advance_demo_gripper(self):
+        if self.telemetry_source is not None:
+            return
+        previous = self.gripper_position
+        step = 16
+        if previous < self.gripper_target:
+            self.gripper_position = min(self.gripper_target, previous + step)
+        elif previous > self.gripper_target:
+            self.gripper_position = max(self.gripper_target, previous - step)
+        if self.gripper_position != previous:
+            direction = "Abrindo" if self.gripper_position < previous else "Fechando"
+            if self.gripper_position == 0:
+                direction = "Aberta"
+            elif self.gripper_position == 255:
+                direction = "Fechada"
+            self.refresh_gripper_state(direction)
+
+    def refresh_gripper_state(self, state):
+        percent_closed = round(100 * self.gripper_position / 255)
+        self.gripper_state_label.setText(
+            f"Garra do UR5e: {state} • {percent_closed}% fechada • demo"
+        )
 
     def set_telemetry_source(self, source):
         """Injeta um leitor já conectado. Não conecta automaticamente ao robô."""
@@ -763,17 +852,17 @@ class ELO(QWidget):
         self.joint_angles["UR3e"] = [
             12 * math.sin(t * 0.35),
             -90 + 8 * math.sin(t * 0.55),
-            -90 + 10 * math.cos(t * 0.45),
+            10 * math.cos(t * 0.45),
             -90 + 5 * math.sin(t * 0.30),
-            90 + 4 * math.cos(t * 0.40),
+            4 * math.cos(t * 0.40),
             8 * math.sin(t * 0.25),
         ]
         self.joint_angles["UR5e"] = [
             8 * math.sin(t * 0.32),
             -90 + 6 * math.sin(t * 0.50),
-            -90 + 8 * math.cos(t * 0.42),
+            8 * math.cos(t * 0.42),
             -90 + 4 * math.sin(t * 0.28),
-            90 + 3 * math.cos(t * 0.36),
+            3 * math.cos(t * 0.36),
             6 * math.sin(t * 0.22),
         ]
         for robot, factor in (("UR3e", 1.0), ("UR5e", 0.7)):
@@ -811,6 +900,9 @@ class ELO(QWidget):
     def refresh_robot_views(self):
         for name, view in self.robot_views.items():
             view.set_joint_angles(self.joint_angles[name])
+        follower_view = self.robot_views.get("UR5e")
+        if follower_view is not None:
+            follower_view.set_gripper_position(self.gripper_position)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

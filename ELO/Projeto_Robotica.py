@@ -8,13 +8,23 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSlider,
     QStackedWidget,
+    QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from .robot_view import RobotArmView
+    from .camera_panel import CameraPanel
+except ImportError:
+    from robot_view import RobotArmView
+    from camera_panel import CameraPanel
 
 
 # Interface demonstrativa. Este arquivo não importa nem conecta ao ur_rtde.
@@ -27,6 +37,10 @@ QFrame#metricTile { background:white; border:1px solid #E5EDF2; border-radius:11
 QFrame#heroCard { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #145A78,stop:1 #168575); border:0; border-radius:22px; }
 QFrame#homeTile { background:white; border:1px solid #E4ECF1; border-radius:17px; }
 QFrame#sideStatus { background:#18394B; border:1px solid #2B4A5B; border-radius:14px; }
+QTabWidget::pane { background:white; border:1px solid #E4ECF1; border-radius:13px; top:-1px; }
+QTabBar::tab { background:#EEF4F7; color:#61798B; padding:10px 17px; margin-right:5px; border-radius:9px 9px 0 0; font-weight:650; }
+QTabBar::tab:selected { background:#DDF3EE; color:#126B61; }
+QSplitter::handle:vertical { background:#DCE7EC; height:8px; border-radius:4px; }
 QLabel { background:transparent; }
 QLabel#pageTitle { font-size:29px; font-weight:700; color:#18384A; }
 QLabel#brand { font-size:27px; font-weight:800; color:white; letter-spacing:1px; }
@@ -44,6 +58,7 @@ QLabel#statusValue { font-size:18px; font-weight:700; }
 QLabel#heroTitle { color:white; font-size:28px; font-weight:700; }
 QLabel#heroCopy { color:#E0F3F1; font-size:14px; }
 QLabel#heroEyebrow { color:#BCECE2; font-size:11px; font-weight:700; letter-spacing:1px; }
+QLabel#modelPlaceholder { background:#F7FAFC; color:#61798B; border:1px dashed #B8CAD3; border-radius:12px; padding:18px; }
 QPushButton { background:#F2F7FA; color:#21465B; border:1px solid #DFE9EF; border-radius:11px; padding:11px 15px; font-weight:650; }
 QPushButton:hover { background:#E4F1F5; }
 QPushButton#nav { text-align:left; color:#C5D7E0; background:transparent; border:0; border-radius:11px; padding:12px; }
@@ -109,6 +124,8 @@ class ELO(QWidget):
         self.values = {}
         self.monitor_values = {}
         self.status_labels = []
+        self.source_labels = []
+        self.robot_views = {}
         self.build()
         self.refresh_values()
 
@@ -371,19 +388,132 @@ class ELO(QWidget):
     def make_monitoring(self):
         layout = self.page(
             "Monitoramento",
-            "Juntas, pose em relação à base e esforços simulados no TCP",
+            "Leituras, modelo 3D e câmeras em uma única tela",
         )
+
+        self.monitor_tabs = QTabWidget()
+        readings_tab = QWidget()
+        readings_layout = QVBoxLayout(readings_tab)
+        readings_layout.setContentsMargins(4, 12, 4, 4)
+        readings_layout.setSpacing(14)
+
+        connection_card, connection_layout = card()
+        connection_layout.addWidget(label("Fonte das leituras", "sectionTitle"))
+        connection_layout.addWidget(label(
+            "Conecte em modo somente leitura para exibir medidas dos robôs. Nenhum comando de movimento é enviado.",
+            "muted",
+        ))
+        connection_layout.addWidget(label(
+            "Os IPs iniciais vêm do ur_rtde.py do projeto; confirme com Isma antes de conectar.",
+            "muted",
+        ))
+        address_row = QHBoxLayout()
+        self.ur3e_ip = QLineEdit("10.104.11.99")
+        self.ur3e_ip.setPlaceholderText("IP do UR3e Leader")
+        self.ur5e_ip = QLineEdit("10.104.11.71")
+        self.ur5e_ip.setPlaceholderText("IP do UR5e Follower")
+        address_row.addWidget(label("UR3e Leader"))
+        address_row.addWidget(self.ur3e_ip, 1)
+        address_row.addWidget(label("UR5e Follower"))
+        address_row.addWidget(self.ur5e_ip, 1)
+        connection_layout.addLayout(address_row)
+
+        action_row = QHBoxLayout()
+        self.connect_button = QPushButton("Conectar para ler medidas")
+        self.connect_button.setObjectName("primary")
+        self.connect_button.clicked.connect(self.connect_telemetry)
+        self.disconnect_button = QPushButton("Desconectar")
+        self.disconnect_button.setEnabled(False)
+        self.disconnect_button.clicked.connect(self.disconnect_telemetry)
+        action_row.addWidget(self.connect_button)
+        action_row.addWidget(self.disconnect_button)
+        self.telemetry_status = label("Desconectado • exibindo dados simulados", "badge")
+        action_row.addWidget(self.telemetry_status, 1)
+        connection_layout.addLayout(action_row)
+        readings_layout.addWidget(connection_card)
+
         self.monitor_row = QHBoxLayout()
         self.monitor_row.setSpacing(16)
         self.monitor_row.addWidget(self.monitor_robot_card("UR3e", "LEADER"), 1)
         self.monitor_row.addWidget(self.monitor_robot_card("UR5e", "FOLLOWER"), 1)
-        layout.addLayout(self.monitor_row)
-        layout.addWidget(label(
-            "Atualização a cada 100 ms. Forças e torques são apenas ilustrativos; não são leituras dos robôs.",
+        readings_layout.addLayout(self.monitor_row)
+        readings_layout.addWidget(label(
+            "Com RTDE conectado, as leituras são reais e somente de leitura. Sem conexão, os valores são simulados.",
             "muted",
         ))
+        readings_layout.addStretch()
+
+        visual_tab = QWidget()
+        visual_layout = QVBoxLayout(visual_tab)
+        visual_layout.setContentsMargins(4, 12, 4, 4)
+        visual_layout.setSpacing(10)
+        visual_layout.addWidget(label(
+            "Modelos 3D manipuláveis • arraste para girar • roda do mouse para aproximar • arraste a divisória para redimensionar",
+            "muted",
+        ))
+
+        self.expanded_camera = None
+        self.view_splitter = QSplitter(Qt.Vertical)
+        self.view_splitter.setChildrenCollapsible(False)
+        self.visualization_card, visualization_layout = card()
+        visualization_layout.addWidget(label("Modelos UR3e e UR5e", "sectionTitle"))
+        self.visual_row = QHBoxLayout()
+        self.visual_row.setSpacing(14)
+        for robot_name, role in (("UR3e", "LEADER"), ("UR5e", "FOLLOWER")):
+            panel = QFrame()
+            panel.setObjectName("softPanel")
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(10, 9, 10, 8)
+            panel_layout.setSpacing(4)
+            panel_layout.addWidget(label(f"{robot_name}  ·  {role}", "sectionTitle"))
+            view = RobotArmView(robot_name)
+            self.robot_views[robot_name] = view
+            panel_layout.addWidget(view, 1)
+            self.visual_row.addWidget(panel, 1)
+        visualization_layout.addLayout(self.visual_row)
+        self.view_splitter.addWidget(self.visualization_card)
+
+        self.cameras_card, cameras_layout = card()
+        cameras_layout.addWidget(label("Câmeras USB", "sectionTitle"))
+        self.camera_row = QHBoxLayout()
+        self.camera_row.setSpacing(12)
+        self.camera_panels = []
+        for title in ("Webcam", "Câmera da garra"):
+            camera_panel = CameraPanel(title)
+            camera_panel.expandRequested.connect(self.toggle_camera_expansion)
+            self.camera_panels.append(camera_panel)
+            self.camera_row.addWidget(camera_panel, 1)
+        cameras_layout.addLayout(self.camera_row)
+        self.view_splitter.addWidget(self.cameras_card)
+        self.view_splitter.setStretchFactor(0, 3)
+        self.view_splitter.setStretchFactor(1, 2)
+        visual_layout.addWidget(self.view_splitter, 1)
+
+        self.monitor_tabs.addTab(readings_tab, "Leituras")
+        self.monitor_tabs.addTab(visual_tab, "Visualização 3D + Câmeras")
+        layout.addWidget(self.monitor_tabs, 1)
         layout.addStretch()
         self.refresh_monitor()
+        self.refresh_robot_views()
+
+    def toggle_camera_expansion(self, selected_panel):
+        """Amplia uma câmera dentro da aba, sem abrir uma janela separada."""
+        if self.expanded_camera is selected_panel:
+            self.expanded_camera = None
+            self.visualization_card.show()
+            for camera_panel in self.camera_panels:
+                camera_panel.show()
+                camera_panel.expand_button.setText("Ampliar")
+            self.view_splitter.setSizes([3, 2])
+            return
+
+        self.expanded_camera = selected_panel
+        self.visualization_card.hide()
+        for camera_panel in self.camera_panels:
+            is_selected = camera_panel is selected_panel
+            camera_panel.setVisible(is_selected)
+            camera_panel.expand_button.setText("Voltar" if is_selected else "Ampliar")
+        self.cameras_card.show()
 
     def metric_tile(self, title, value, key):
         tile = QFrame()
@@ -419,7 +549,9 @@ class ELO(QWidget):
         header.addWidget(label(name, "robotName"), 1)
         header.addWidget(label(role, "roleBadge"))
         layout.addLayout(header)
-        layout.addWidget(label("Dados locais • modo demonstração", "muted"))
+        source_label = label("Dados simulados • modo demonstração", "muted")
+        self.source_labels.append(source_label)
+        layout.addWidget(source_label)
 
         joint_metrics = [
             (f"Junta {i + 1}", "0,0°", (name, "joint", i)) for i in range(6)
@@ -451,9 +583,8 @@ class ELO(QWidget):
         layout = self.page("Configurações", "Informações gerais do protótipo")
         widget, box = card()
         box.addWidget(label("Conexão dos robôs", "robotName"))
-        box.addWidget(label("UR3e: simulação local"))
-        box.addWidget(label("UR5e: simulação local"))
-        box.addWidget(label("Nenhuma conexão RTDE é realizada nesta versão.", "muted"))
+        box.addWidget(label("As leituras RTDE são configuradas na tela Monitoramento."))
+        box.addWidget(label("A interface usa somente RTDEReceive para telemetria; os botões de operação continuam simulados.", "muted"))
         layout.addWidget(widget)
         layout.addStretch()
 
@@ -481,12 +612,22 @@ class ELO(QWidget):
             self.summary_params.setText(f"Velocidade: {self.speed}%     |     Escala: {scale}×")
 
     def start(self):
+        if self.telemetry_source is not None:
+            self.operation_info.setText(
+                "RTDE conectado somente para leitura. Este botão não movimenta o robô."
+            )
+            return
         self.running = True
         self.paused = False
         self.set_state("Simulação em andamento")
         self.add_log("Simulação iniciada")
 
     def pause(self):
+        if self.telemetry_source is not None:
+            self.operation_info.setText(
+                "Pausar simulação não interrompe as leituras RTDE nem envia comandos ao robô."
+            )
+            return
         if not self.running:
             return
         self.paused = not self.paused
@@ -495,6 +636,11 @@ class ELO(QWidget):
         self.add_log("Simulação pausada" if self.paused else "Simulação retomada")
 
     def stop(self):
+        if self.telemetry_source is not None:
+            self.operation_info.setText(
+                "Parar simulação não desconecta o RTDE. Use Desconectar em Monitoramento."
+            )
+            return
         self.running = False
         self.paused = False
         self.set_state("Operação parada")
@@ -511,13 +657,72 @@ class ELO(QWidget):
         self.log_text.setText("\n".join((old_lines + [text])[-12:]))
 
     def tick(self):
-        if self.running and not self.paused:
-            if self.telemetry_source is None:
-                self.update_simulation()
-            else:
+        if self.telemetry_source is not None:
+            try:
                 self.update_from_telemetry()
-            self.refresh_values()
+            except Exception as error:
+                self.disconnect_telemetry(
+                    f"Falha na leitura RTDE: {str(error)[:70]}"
+                )
+        elif self.running and not self.paused:
+            self.update_simulation()
+        self.refresh_values()
         self.refresh_monitor()
+        self.refresh_robot_views()
+
+    def connect_telemetry(self):
+        """Conecta aos dois robôs apenas para receber dados, sem comandos."""
+        if self.telemetry_source is not None:
+            return
+        addresses = {
+            "UR3e": self.ur3e_ip.text().strip(),
+            "UR5e": self.ur5e_ip.text().strip(),
+        }
+        if not all(addresses.values()):
+            self.telemetry_status.setText("Informe os dois endereços IP")
+            return
+
+        self.connect_button.setEnabled(False)
+        self.telemetry_status.setText("Conectando para leitura...")
+        QApplication.processEvents()
+        source = None
+        try:
+            # Import tardio: a biblioteca RTDE só é carregada após o clique.
+            try:
+                from .rtde_telemetry import RTDETelemetrySource
+            except ImportError:
+                from rtde_telemetry import RTDETelemetrySource
+            source = RTDETelemetrySource(addresses)
+            source.connect()
+            source.read()  # valida a leitura inicial antes de mudar o estado da UI
+            self.set_telemetry_source(source)
+            self.disconnect_button.setEnabled(True)
+            self.telemetry_status.setText("Conectado • telemetria real, somente leitura")
+            for source_label in self.source_labels:
+                source_label.setText("RTDE • leitura real, somente leitura")
+            for status_label in self.status_labels:
+                status_label.setText("Telemetria conectada")
+            self.add_log("Telemetria RTDE conectada (somente leitura)")
+        except Exception as error:
+            if source is not None:
+                source.close()
+            self.connect_button.setEnabled(True)
+            self.telemetry_status.setText(f"Não conectou: {str(error)[:75]}")
+            self.add_log("Falha ao conectar telemetria RTDE")
+
+    def disconnect_telemetry(self, status="Desconectado • exibindo dados simulados"):
+        source, self.telemetry_source = self.telemetry_source, None
+        if source is not None:
+            source.close()
+        if hasattr(self, "connect_button"):
+            self.connect_button.setEnabled(True)
+            self.disconnect_button.setEnabled(False)
+            self.telemetry_status.setText(status)
+            for source_label in self.source_labels:
+                source_label.setText("Dados simulados • modo demonstração")
+            for status_label in self.status_labels:
+                status_label.setText("Movimento: parado")
+        self.add_log("Telemetria RTDE desconectada")
 
     def update_simulation(self):
         self.t += 0.1 * self.speed / 50
@@ -549,6 +754,8 @@ class ELO(QWidget):
     def closeEvent(self, event):
         if self.telemetry_source is not None:
             self.telemetry_source.close()
+        for camera_panel in getattr(self, "camera_panels", []):
+            camera_panel.stop_camera()
         super().closeEvent(event)
 
     def update_simulated_feedback(self):
@@ -601,6 +808,10 @@ class ELO(QWidget):
                 formatted = f"{value:.2f} N" if index < 3 else f"{value:.3f} Nm"
                 self.monitor_values[(name, "wrench", index)].setText(formatted)
 
+    def refresh_robot_views(self):
+        for name, view in self.robot_views.items():
+            view.set_joint_angles(self.joint_angles[name])
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "robot_row"):
@@ -608,6 +819,10 @@ class ELO(QWidget):
             direction = QVBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight
             self.robot_row.setDirection(direction)
             self.monitor_row.setDirection(direction)
+            if hasattr(self, "visual_row"):
+                self.visual_row.setDirection(direction)
+            if hasattr(self, "camera_row"):
+                self.camera_row.setDirection(direction)
             self.sidebar.setFixedWidth(170 if narrow else 222)
 
 

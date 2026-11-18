@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
 try:
     from .robot_view import RobotArmView
     from .camera_panel import CameraPanel
+    from .focus_overlay import CameraFocusOverlay
 except ImportError:
     from robot_view import RobotArmView
     from camera_panel import CameraPanel
+    from focus_overlay import CameraFocusOverlay
 
 
 # Interface demonstrativa. Este arquivo não importa nem conecta ao ur_rtde.
@@ -132,7 +134,12 @@ class ELO(QWidget):
         self.status_labels = []
         self.source_labels = []
         self.robot_views = {}
+        self.robot_panels = {}
+        self.camera_focus_active = False
         self.build()
+        self.focus_overlay = CameraFocusOverlay(self)
+        self.focus_overlay.exitRequested.connect(self.exit_camera_focus)
+        self.focus_overlay.hide()
         self.refresh_values()
 
         self.timer = QTimer(self)
@@ -353,12 +360,17 @@ class ELO(QWidget):
             ("▶  Iniciar", self.start, "primary"),
             ("Ⅱ  Pausar / Retomar", self.pause, None),
             ("■  Parar", self.stop, "danger"),
+            ("⌂  Home (demo)", self.move_simulated_home, None),
         ]:
             button = QPushButton(title)
             if object_name:
                 button.setObjectName(object_name)
             button.clicked.connect(callback)
             box.addWidget(button)
+        box.addWidget(label(
+            "Home e os demais controles de Operação atuam somente na demonstração nesta versão.",
+            "muted",
+        ))
         layout.addWidget(widget)
         self.operation_info = label("Operação parada. Nenhum robô real é controlado.", "badge")
         layout.addWidget(self.operation_info)
@@ -489,6 +501,7 @@ class ELO(QWidget):
             panel_layout.addWidget(label(f"{robot_name}  ·  {role}", "sectionTitle"))
             view = RobotArmView(robot_name)
             self.robot_views[robot_name] = view
+            self.robot_panels[robot_name] = panel
             panel_layout.addWidget(view, 1)
             self.visual_row.addWidget(panel, 1)
         visualization_layout.addLayout(self.visual_row)
@@ -518,23 +531,98 @@ class ELO(QWidget):
         self.refresh_robot_views()
 
     def toggle_camera_expansion(self, selected_panel):
-        """Amplia uma câmera dentro da aba, sem abrir uma janela separada."""
-        if self.expanded_camera is selected_panel:
-            self.expanded_camera = None
-            self.visualization_card.show()
-            for camera_panel in self.camera_panels:
-                camera_panel.show()
-                camera_panel.expand_button.setText("Ampliar")
-            self.view_splitter.setSizes([3, 2])
+        """Abre a câmera em tela cheia ou alterna qual câmera fica principal."""
+        if self.camera_focus_active:
+            if self.expanded_camera is selected_panel:
+                self.exit_camera_focus()
+            else:
+                self.switch_focus_camera(selected_panel)
             return
 
+        self.enter_camera_focus(selected_panel)
+
+    def enter_camera_focus(self, selected_panel):
+        self._restore_was_fullscreen = self.isFullScreen()
+        self._restore_was_maximized = self.isMaximized()
+        self.camera_focus_active = True
         self.expanded_camera = selected_panel
-        self.visualization_card.hide()
-        for camera_panel in self.camera_panels:
-            is_selected = camera_panel is selected_panel
-            camera_panel.setVisible(is_selected)
-            camera_panel.expand_button.setText("Voltar" if is_selected else "Ampliar")
-        self.cameras_card.show()
+        other_panel = next(panel for panel in self.camera_panels if panel is not selected_panel)
+
+        self.camera_row.removeWidget(selected_panel)
+        self.camera_row.removeWidget(other_panel)
+        selected_panel.setParent(None)
+        other_panel.setParent(None)
+        selected_panel.set_focus_mode("main")
+        other_panel.set_focus_mode("pip")
+        self.focus_overlay.set_main_widget(selected_panel)
+        self.focus_overlay.set_camera_pip(other_panel)
+        self.focus_overlay.set_camera_title(
+            selected_panel.title_label.text(), other_panel.title_label.text()
+        )
+
+        robot_tabs = QTabWidget()
+        for robot_name in ("UR3e", "UR5e"):
+            panel = self.robot_panels[robot_name]
+            self.visual_row.removeWidget(panel)
+            panel.setParent(None)
+            robot_tabs.addTab(panel, robot_name)
+        self._focus_robot_tabs = robot_tabs
+        self.focus_overlay.set_robot_pip(robot_tabs)
+
+        self.showFullScreen()
+        self.sidebar.hide()
+        self.pages.hide()
+        self.focus_overlay.setGeometry(self.rect())
+        self.focus_overlay.show()
+        self.focus_overlay.raise_()
+
+    def switch_focus_camera(self, selected_panel):
+        current_main = self.focus_overlay.take_main_widget()
+        pip_camera = self.focus_overlay.take_camera_pip()
+        if selected_panel is not pip_camera:
+            selected_panel = pip_camera
+        current_main.set_focus_mode("pip")
+        selected_panel.set_focus_mode("main")
+        self.focus_overlay.set_main_widget(selected_panel)
+        self.focus_overlay.set_camera_pip(current_main)
+        self.expanded_camera = selected_panel
+        self.focus_overlay.set_camera_title(
+            selected_panel.title_label.text(), current_main.title_label.text()
+        )
+
+    def exit_camera_focus(self):
+        if not self.camera_focus_active:
+            return
+        main_panel = self.focus_overlay.take_main_widget()
+        pip_camera = self.focus_overlay.take_camera_pip()
+        robot_tabs = self.focus_overlay.take_robot_pip()
+        if main_panel is not None:
+            main_panel.restore_normal_mode()
+            self.camera_row.addWidget(main_panel, 1)
+        if pip_camera is not None:
+            pip_camera.restore_normal_mode()
+            self.camera_row.addWidget(pip_camera, 1)
+        if robot_tabs is not None:
+            for _ in range(robot_tabs.count()):
+                panel = robot_tabs.widget(0)
+                robot_tabs.removeTab(0)
+                panel.setParent(None)
+                self.visual_row.addWidget(panel, 1)
+
+        self.focus_overlay.hide()
+        self.camera_focus_active = False
+        self.expanded_camera = None
+        self.sidebar.show()
+        self.pages.show()
+        self.monitor_tabs.setCurrentIndex(1)
+        if self._restore_was_fullscreen:
+            self.showFullScreen()
+        elif self._restore_was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.view_splitter.setSizes([3, 2])
+
 
     def metric_tile(self, title, value, key):
         tile = QFrame()
@@ -687,6 +775,33 @@ class ELO(QWidget):
         self.paused = False
         self.set_state("Operação parada")
         self.add_log("Simulação parada")
+
+    def move_simulated_home(self):
+        """Retorna a postura da demonstração à pose inicial definida na UI."""
+        if self.telemetry_source is not None:
+            self.operation_info.setText(
+                "A conexão atual é somente de leitura. Home físico ainda não está integrado."
+            )
+            self.add_log("Home solicitado, mas não enviado: conexão RTDE é somente leitura")
+            return
+
+        self.running = False
+        self.paused = False
+        self.t = 0.0
+        home_angles = [0.0, -90.0, 0.0, -90.0, 0.0, 0.0]
+        for name in ("UR3e", "UR5e"):
+            self.joint_angles[name] = list(home_angles)
+        self.positions["UR3e"] = [180.0, -120.0, 250.0, 0.0, 3.142, 0.0]
+        self.positions["UR5e"] = [350.0, -180.0, 400.0, 0.0, 3.142, 0.0]
+        self.wrenches = {
+            "UR3e": [0.0] * 6,
+            "UR5e": [0.0] * 6,
+        }
+        self.set_state("Pose Home simulada")
+        self.refresh_values()
+        self.refresh_monitor()
+        self.refresh_robot_views()
+        self.add_log("Demonstração retornou à pose Home")
 
     def set_state(self, state):
         self.operation_info.setText(f"{state}. Nenhum robô real é controlado.")
@@ -906,6 +1021,9 @@ class ELO(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self.camera_focus_active:
+            self.focus_overlay.setGeometry(self.rect())
+            self.focus_overlay.raise_()
         if hasattr(self, "robot_row"):
             narrow = self.width() < 930
             direction = QVBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight

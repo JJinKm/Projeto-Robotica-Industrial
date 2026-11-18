@@ -25,7 +25,8 @@ class CameraPanel(QFrame):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel(title), 1)
+        self.title_label = QLabel(title)
+        header.addWidget(self.title_label, 1)
         self.refresh_button = QPushButton("Atualizar câmeras")
         self.refresh_button.clicked.connect(self.refresh_devices)
         header.addWidget(self.refresh_button)
@@ -58,7 +59,22 @@ class CameraPanel(QFrame):
         self.status_label.setObjectName("muted")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self._normal_video_minimum = 200
         self.refresh_devices()
+
+    def set_focus_mode(self, mode):
+        """Ajusta o painel para ocupar a tela ou aparecer em uma janela PiP."""
+        compact = mode == "pip"
+        self.refresh_button.setVisible(not compact)
+        self.status_label.setVisible(not compact)
+        self.video_widget.setMinimumHeight(120 if compact else self._normal_video_minimum)
+        if mode == "main":
+            self.expand_button.setText("Voltar")
+        else:
+            self.expand_button.setText("Ampliar")
+
+    def restore_normal_mode(self):
+        self.set_focus_mode("normal")
 
     def refresh_devices(self):
         selected_id = self.device_combo.currentData()

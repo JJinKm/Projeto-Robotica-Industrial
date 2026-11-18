@@ -234,7 +234,7 @@ garra_moving = 0
 f_mag = 0
 
 teachmode_flag = 0
-F_ENTRA_FORCE = 1.6   # N  acima disso o leader sai do teach mode e vai p/ force mode
+F_ENTRA_FORCE = 1.1   # N  acima disso o leader sai do teach mode e vai p/ force mode
 F_SAI_FORCE = 0.5     # N  abaixo disso o leader volta p/ teach mode
 
 conectar_garra()
@@ -326,15 +326,17 @@ try:
                 w_lider = math.sqrt(sum(x*x for x in w_ref))
                 
                 if f_lider > F_ENTRA_FORCE:
-                    if teachmode_flag:    
+                    if teachmode_flag:
                         rtde_master_c.endTeachMode()
                         teachmode_flag = 0
                     passo_forca(w_ref, f_mag)
+                    print("Primeiro if força no lider: {0}".format(f_lider))
                 elif f_lider < F_SAI_FORCE:
                     if not teachmode_flag:
                         rtde_master_c.forceModeStop()
                         rtde_master_c.teachMode()
                         teachmode_flag = 1
+                    print("Segundo if força no lider: {0}".format(f_lider))
                 else:
                     if not teachmode_flag:
                         rtde_master_c.forceModeStop()
@@ -345,6 +347,7 @@ try:
 
         # Se o script de algum robô morreu (ex.: protective stop), para tudo
         if not (rtde_master_c.isProgramRunning() and rtde_follow_c.isProgramRunning()):
+            garra.serial.close()
             print("Script de controle parou em um dos robôs "
                   "(protective stop?). Encerrando.")
             break

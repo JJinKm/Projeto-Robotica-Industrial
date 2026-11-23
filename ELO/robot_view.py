@@ -14,25 +14,25 @@ from PySide6.QtWidgets import QLabel, QStackedLayout, QVBoxLayout, QWidget
 
 LINK_NAMES = ("base", "shoulder", "upperarm", "forearm", "wrist1", "wrist2", "wrist3")
 ROBOT_COLORS = {
-    # Verde-água para o UR3e Leader.
+    # Tons saturados de menta: claros, mas com contraste suficiente para manter volume.
     "UR3e": {
-        "base": (0.08, 0.40, 0.44, 1.0),
-        "shoulder": (0.08, 0.58, 0.60, 1.0),
-        "upperarm": (0.12, 0.78, 0.74, 1.0),
-        "forearm": (0.05, 0.67, 0.70, 1.0),
-        "wrist1": (0.20, 0.74, 0.76, 1.0),
-        "wrist2": (0.14, 0.62, 0.66, 1.0),
-        "wrist3": (0.07, 0.50, 0.57, 1.0),
+        "base": (0.36, 0.60, 0.48, 1.0),
+        "shoulder": (0.40, 0.68, 0.50, 1.0),
+        "upperarm": (0.48, 0.76, 0.57, 1.0),
+        "forearm": (0.44, 0.72, 0.53, 1.0),
+        "wrist1": (0.57, 0.82, 0.65, 1.0),
+        "wrist2": (0.49, 0.74, 0.58, 1.0),
+        "wrist3": (0.40, 0.66, 0.49, 1.0),
     },
-    # Azul para o UR5e Follower.
+    # Azul metálico mais claro para diferenciar visualmente o UR5e.
     "UR5e": {
-        "base": (0.14, 0.30, 0.58, 1.0),
-        "shoulder": (0.21, 0.42, 0.73, 1.0),
-        "upperarm": (0.30, 0.59, 0.91, 1.0),
-        "forearm": (0.20, 0.49, 0.83, 1.0),
-        "wrist1": (0.34, 0.59, 0.86, 1.0),
-        "wrist2": (0.29, 0.68, 0.95, 1.0),
-        "wrist3": (0.17, 0.39, 0.73, 1.0),
+        "base": (0.36, 0.49, 0.65, 1.0),
+        "shoulder": (0.43, 0.57, 0.73, 1.0),
+        "upperarm": (0.54, 0.68, 0.84, 1.0),
+        "forearm": (0.48, 0.63, 0.80, 1.0),
+        "wrist1": (0.63, 0.76, 0.90, 1.0),
+        "wrist2": (0.54, 0.68, 0.84, 1.0),
+        "wrist3": (0.43, 0.58, 0.76, 1.0),
     },
 }
 
@@ -149,11 +149,12 @@ def _to_qmatrix(matrix):
 class RobotArmView(QWidget):
     """Visualizador 3D com câmera orbitável e malhas separadas por junta."""
 
-    def __init__(self, robot_name, parent=None):
+    def __init__(self, robot_name, parent=None, compact=False):
         super().__init__(parent)
         if robot_name not in JOINT_ORIGINS:
             raise ValueError(f"Modelo UR não suportado: {robot_name}")
         self.robot_name = robot_name
+        self.compact = compact
         self.joint_angles_deg = [0.0] * 6
         self.gripper_position = 0
         self.mesh_items = []
@@ -165,12 +166,13 @@ class RobotArmView(QWidget):
         self.placeholder.setAlignment(Qt.AlignCenter)
         self.placeholder.setWordWrap(True)
         self.placeholder.setObjectName("modelPlaceholder")
-        self.placeholder.setMinimumSize(300, 270)
+        minimum_size = (225, 205) if compact else (300, 270)
+        self.placeholder.setMinimumSize(*minimum_size)
         self.stack.addWidget(self.placeholder)
 
         self.view = gl.GLViewWidget()
-        self.view.setMinimumSize(300, 270)
-        self.view.setBackgroundColor("#F7FAFC")
+        self.view.setMinimumSize(*minimum_size)
+        self.view.setBackgroundColor("#E8F0EA")
         self.view.opts["fov"] = 38
         self.stack.addWidget(self.view)
 
@@ -178,10 +180,46 @@ class RobotArmView(QWidget):
         self.load_model()
 
     def _add_reference_grid(self):
+        floor_mesh = trimesh.creation.box(extents=(1.8, 1.8, 0.008))
+        floor_mesh.apply_translation((0.0, 0.0, -0.006))
+        floor_data = gl.MeshData(
+            vertexes=np.asarray(floor_mesh.vertices, dtype=np.float32),
+            faces=np.asarray(floor_mesh.faces, dtype=np.uint32),
+        )
+        floor = gl.GLMeshItem(
+            meshdata=floor_data,
+            color=(0.80, 0.87, 0.81, 1.0),
+            smooth=False,
+            drawEdges=False,
+            # Piso sem shader evita que a iluminação OpenGL o escureça demais.
+            shader=None,
+            glOptions="opaque",
+        )
+        self.view.addItem(floor)
+
+        # Sombra de contato suave para ancorar visualmente a base no chão.
+        shadow_mesh = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+        shadow_mesh.vertices *= np.array([0.22, 0.19, 0.0015])
+        shadow_mesh.apply_translation((0.0, 0.0, 0.0005))
+        shadow_data = gl.MeshData(
+            vertexes=np.asarray(shadow_mesh.vertices, dtype=np.float32),
+            faces=np.asarray(shadow_mesh.faces, dtype=np.uint32),
+        )
+        self.shadow_item = gl.GLMeshItem(
+            meshdata=shadow_data,
+            color=(0.08, 0.12, 0.09, 0.30),
+            smooth=True,
+            drawEdges=False,
+            shader=None,
+            glOptions="translucent",
+        )
+        self.view.addItem(self.shadow_item)
+
         grid = gl.GLGridItem()
-        grid.setSize(x=1.25, y=1.25)
+        grid.setSize(x=1.8, y=1.8)
         grid.setSpacing(x=0.1, y=0.1)
-        grid.setColor((0.72, 0.79, 0.83, 0.45))
+        grid.setColor((0.38, 0.52, 0.41, 0.42))
+        grid.translate(0.0, 0.0, 0.001)
         self.view.addItem(grid)
         axes = gl.GLAxisItem()
         axes.setSize(x=0.22, y=0.22, z=0.22)
@@ -212,7 +250,7 @@ class RobotArmView(QWidget):
                     color=ROBOT_COLORS[self.robot_name][link_name],
                     smooth=True,
                     drawEdges=False,
-                    shader="edgeHilight",
+                    shader="shaded",
                     glOptions="opaque",
                 )
                 self.view.addItem(mesh_item)
@@ -221,10 +259,10 @@ class RobotArmView(QWidget):
             if self.robot_name == "UR5e":
                 self._add_demo_gripper()
 
-            distance = 0.85 if self.robot_name == "UR3e" else 1.35
+            distance = 0.72 if self.robot_name == "UR3e" else 1.12
             target_height = 0.22 if self.robot_name == "UR3e" else 0.34
             self.view.opts["center"] = QVector3D(0.0, 0.0, target_height)
-            self.view.setCameraPosition(distance=distance, elevation=24, azimuth=42)
+            self.view.setCameraPosition(distance=distance, elevation=27, azimuth=42)
             self.model_loaded = True
             self.stack.setCurrentWidget(self.view)
             self.set_joint_angles(self.joint_angles_deg)
@@ -238,11 +276,11 @@ class RobotArmView(QWidget):
     def _add_demo_gripper(self):
         """Desenha uma garra paralela simples no flange do UR5e."""
         parts = (
-            ((0.120, 0.082, 0.050), (0.10, 0.16, 0.20, 1.0)),
-            ((0.016, 0.034, 0.085), (0.16, 0.25, 0.29, 1.0)),
-            ((0.016, 0.034, 0.085), (0.16, 0.25, 0.29, 1.0)),
-            ((0.006, 0.036, 0.060), (0.12, 0.66, 0.63, 1.0)),
-            ((0.006, 0.036, 0.060), (0.12, 0.66, 0.63, 1.0)),
+            ((0.120, 0.082, 0.050), (0.45, 0.59, 0.69, 1.0)),
+            ((0.016, 0.034, 0.085), (0.56, 0.69, 0.78, 1.0)),
+            ((0.016, 0.034, 0.085), (0.56, 0.69, 0.78, 1.0)),
+            ((0.006, 0.036, 0.060), (0.50, 0.80, 0.38, 1.0)),
+            ((0.006, 0.036, 0.060), (0.50, 0.80, 0.38, 1.0)),
         )
         for size, color in parts:
             mesh = trimesh.creation.box(extents=size)
@@ -255,7 +293,7 @@ class RobotArmView(QWidget):
                 color=color,
                 smooth=False,
                 drawEdges=False,
-                shader="edgeHilight",
+                shader="shaded",
                 glOptions="opaque",
             )
             self.view.addItem(item)

@@ -1,7 +1,9 @@
 import math
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -29,53 +31,59 @@ except ImportError:
     from focus_overlay import CameraFocusOverlay
 
 
-# Interface demonstrativa. Este arquivo não importa nem conecta ao ur_rtde.
+# Interface AEGIS. A telemetria continua opcional e os controles de movimento
+# permanecem simulados; este arquivo não envia comandos de movimento ao RTDE.
 STYLE = """
-QWidget { background:#F3F7FA; color:#18384A; font-family:'Segoe UI'; font-size:14px; }
-QFrame#sidebar { background:#102C3D; border-radius:22px; }
-QFrame#card { background:white; border:1px solid #E4ECF1; border-radius:18px; }
-QFrame#softPanel { background:#F7FAFC; border:1px solid #E5EDF2; border-radius:13px; }
-QFrame#metricTile { background:white; border:1px solid #E5EDF2; border-radius:11px; }
-QFrame#heroCard { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #145A78,stop:1 #168575); border:0; border-radius:22px; }
-QFrame#homeTile { background:white; border:1px solid #E4ECF1; border-radius:17px; }
-QFrame#sideStatus { background:#18394B; border:1px solid #2B4A5B; border-radius:14px; }
-QTabWidget::pane { background:white; border:1px solid #E4ECF1; border-radius:13px; top:-1px; }
-QTabBar::tab { background:#EEF4F7; color:#61798B; padding:10px 17px; margin-right:5px; border-radius:9px 9px 0 0; font-weight:650; }
-QTabBar::tab:selected { background:#DDF3EE; color:#126B61; }
-QSplitter::handle:vertical { background:#DCE7EC; height:8px; border-radius:4px; }
+QWidget { background:#06140F; color:#F0F6F1; font-family:'Segoe UI'; font-size:14px; }
+QFrame#sidebar { background:#04100C; border:1px solid #173A28; border-radius:20px; }
+QFrame#brandMark { background:#0B2418; border:2px solid #8EEA32; border-radius:21px; }
+QFrame#card { background:#091B13; border:1px solid #214832; border-radius:17px; }
+QFrame#softPanel { background:#0A2117; border:1px solid #214832; border-radius:13px; }
+QFrame#metricTile { background:#0D281B; border:1px solid #244B33; border-radius:11px; }
+QFrame#heroCard { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #071B12,stop:0.58 #0C2B1A,stop:1 #174225); border:1px solid #376D3B; border-radius:20px; }
+QFrame#homeTile { background:#0A2016; border:1px solid #2A5735; border-radius:15px; }
+QFrame#pageHeader { background:transparent; border-bottom:1px solid #1D3D2A; }
+QTabWidget::pane { background:#081A12; border:1px solid #214832; border-radius:12px; top:-1px; }
+QTabBar::tab { background:#0A2117; color:#A5BBA9; padding:10px 17px; margin-right:5px; border:1px solid #244B33; border-radius:9px 9px 0 0; font-weight:650; }
+QTabBar::tab:selected { background:#244C2A; color:#B5FF5B; border-color:#5E9E36; }
+QSplitter::handle:vertical { background:#1E412B; height:8px; border-radius:4px; }
+QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; border:0; }
 QLabel { background:transparent; }
-QLabel#pageTitle { font-size:29px; font-weight:700; color:#18384A; }
-QLabel#brand { font-size:27px; font-weight:800; color:white; letter-spacing:1px; }
-QLabel#brandMark { background:#BDEFE4; color:#126A61; border-radius:13px; font-size:23px; font-weight:800; }
-QLabel#sideSection { color:#91AAB8; font-size:10px; font-weight:700; letter-spacing:1px; padding:8px 10px 2px; }
-QLabel#sideMuted { color:#A9C0CC; }
-QLabel#robotName { font-size:21px; font-weight:700; }
-QLabel#sectionTitle { font-size:14px; font-weight:700; color:#214D6C; }
-QLabel#metricCaption { color:#61798B; font-size:12px; font-weight:600; }
-QLabel#metricValue { color:#173B56; font-size:15px; font-weight:700; }
-QLabel#muted { color:#61798B; }
-QLabel#badge { background:#E4F4F2; color:#167365; border-radius:11px; padding:7px 12px; font-weight:700; }
-QLabel#roleBadge { background:#E8F5F2; color:#14705F; border-radius:10px; padding:6px 10px; font-weight:700; }
-QLabel#statusValue { font-size:18px; font-weight:700; }
-QLabel#heroTitle { color:white; font-size:28px; font-weight:700; }
-QLabel#heroCopy { color:#E0F3F1; font-size:14px; }
-QLabel#heroEyebrow { color:#BCECE2; font-size:11px; font-weight:700; letter-spacing:1px; }
-QLabel#modelPlaceholder { background:#F7FAFC; color:#61798B; border:1px dashed #B8CAD3; border-radius:12px; padding:18px; }
-QPushButton { background:#F2F7FA; color:#21465B; border:1px solid #DFE9EF; border-radius:11px; padding:11px 15px; font-weight:650; }
-QPushButton:hover { background:#E4F1F5; }
-QPushButton#nav { text-align:left; color:#C5D7E0; background:transparent; border:0; border-radius:11px; padding:12px; }
-QPushButton#nav:hover { background:#1B3D50; color:white; }
-QPushButton#nav:checked { background:#D9F3EE; color:#11675B; }
-QPushButton#primary { background:#167F73; color:white; border:0; }
-QPushButton#primary:hover { background:#126D64; }
-QPushButton#demo { background:#E2F4EF; color:#11675B; border:1px solid #C9E8DE; }
-QPushButton#heroButton { background:white; color:#125D63; border:0; border-radius:11px; padding:12px 17px; font-weight:700; }
-QPushButton#heroButton:hover { background:#E8F8F4; }
-QPushButton#tileButton { text-align:left; background:transparent; border:0; color:#147365; padding:4px 0; }
-QPushButton#danger { background:#FCE9EB; color:#A51E35; border:0; }
-QPushButton#selected { background:#1477AC; color:white; }
-QSlider::groove:horizontal { height:7px; background:#D7E6F1; border-radius:3px; }
-QSlider::handle:horizontal { background:#168A76; width:17px; margin:-6px 0; border-radius:8px; }
+QLabel#pageTitle { font-size:28px; font-weight:750; color:#F4F8F3; }
+QLabel#brand { font-size:25px; font-weight:800; color:#F4F8F3; letter-spacing:2px; }
+QLabel#brandGlyph { color:#A2F33B; font-size:24px; font-weight:700; }
+QLabel#sideSection { color:#789585; font-size:10px; font-weight:700; letter-spacing:1px; padding:8px 10px 2px; }
+QLabel#sideMuted { color:#9FB5A5; }
+QLabel#robotName { font-size:21px; font-weight:700; color:#F3F7F2; }
+QLabel#sectionTitle { font-size:14px; font-weight:700; color:#EAF4E8; }
+QLabel#metricCaption { color:#A2B8A7; font-size:12px; font-weight:600; }
+QLabel#metricValue { color:#F1F7EF; font-size:15px; font-weight:700; }
+QLabel#muted { color:#A0B5A5; }
+QLabel#badge { background:#123522; color:#B5FF5B; border:1px solid #28633C; border-radius:11px; padding:7px 12px; font-weight:700; }
+QLabel#roleBadge { background:#123522; color:#A7F144; border:1px solid #28633C; border-radius:10px; padding:6px 10px; font-weight:700; }
+QLabel#statusValue { font-size:18px; font-weight:700; color:#F2F7F1; }
+QLabel#heroTitle { color:white; font-size:32px; font-weight:750; }
+QLabel#heroCopy { color:#D5E6D7; font-size:14px; }
+QLabel#heroEyebrow { color:#A9F046; font-size:11px; font-weight:750; letter-spacing:1.4px; }
+QLabel#modelPlaceholder { background:#0C2117; color:#A0B5A5; border:1px dashed #386544; border-radius:12px; padding:18px; }
+QPushButton { background:#10271A; color:#E8F2E8; border:1px solid #31553A; border-radius:10px; padding:10px 14px; font-weight:650; }
+QPushButton:hover { background:#173821; border-color:#74C83A; }
+QPushButton:disabled { background:#0A1911; color:#637868; border-color:#1B3524; }
+QPushButton#nav { text-align:left; color:#B6C7BA; background:transparent; border:0; border-radius:9px; padding:11px 12px; }
+QPushButton#nav:hover { background:#10291A; color:#F4F8F3; }
+QPushButton#nav:checked { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
+QPushButton#primary { background:#91EA32; color:#10200D; border:0; font-weight:750; }
+QPushButton#primary:hover { background:#A5F54A; }
+QPushButton#demo { background:#112A1C; color:#B5FF5B; border:1px solid #47763B; }
+QPushButton#heroButton { background:#9AF13A; color:#11210D; border:0; border-radius:12px; padding:12px 18px; font-weight:750; }
+QPushButton#heroButton:hover { background:#B0FF5E; }
+QPushButton#tileButton { text-align:left; background:transparent; border:0; color:#A9F046; padding:4px 0; }
+QPushButton#danger { background:#321817; color:#FF7770; border:1px solid #A83C35; }
+QPushButton#selected { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
+QLineEdit, QComboBox { background:#07170F; color:#EDF5ED; border:1px solid #31553A; border-radius:8px; padding:9px 10px; selection-background-color:#4C8C2E; }
+QComboBox QAbstractItemView { background:#0A2117; color:#EDF5ED; selection-background-color:#28562B; border:1px solid #31553A; }
+QSlider::groove:horizontal { height:7px; background:#24432E; border-radius:3px; }
+QSlider::handle:horizontal { background:#9AF13A; border:2px solid #D4FF9F; width:17px; margin:-6px 0; border-radius:8px; }
 """
 
 
@@ -96,10 +104,10 @@ def card():
     return widget, layout
 
 
-class ELO(QWidget):
+class AegisApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ELO | Leader-Follower — Demonstração")
+        self.setWindowTitle("AEGIS | Desarme robótico")
         self.resize(1180, 740)
         self.setMinimumSize(690, 480)
         self.setStyleSheet(STYLE)
@@ -109,11 +117,8 @@ class ELO(QWidget):
         self.t = 0.0
         self.speed = 50
         self.scale = 1.0
-        # gPO do Robotiq: 0 = aberta, 255 = fechada. Na demo, o botão
-        # abaixo controla apenas o modelo 3D e não envia comandos à garra.
+        # Posição inicial visual da garra no modelo 3D; ainda não é gPO real.
         self.gripper_position = 255
-        self.gripper_target = 255
-        self.gripper_previous_position = 255
         self.positions = {
             "UR3e": [180.0, -120.0, 250.0, 0.0, 3.142, 0.0],
             "UR5e": [350.0, -180.0, 400.0, 0.0, 3.142, 0.0],
@@ -134,7 +139,9 @@ class ELO(QWidget):
         self.status_labels = []
         self.source_labels = []
         self.robot_views = {}
+        self.focus_robot_views = {}
         self.robot_panels = {}
+        self.log_entries = []
         self.camera_focus_active = False
         self.build()
         self.focus_overlay = CameraFocusOverlay(self)
@@ -158,24 +165,28 @@ class ELO(QWidget):
         sidebar_layout.setContentsMargins(14, 18, 14, 16)
         sidebar_layout.setSpacing(5)
 
-        brand_row = QHBoxLayout()
-        brand_mark = label("E", "brandMark")
-        brand_mark.setAlignment(Qt.AlignCenter)
-        brand_mark.setFixedSize(42, 42)
-        brand_row.addWidget(brand_mark)
-        brand_name = QVBoxLayout()
-        brand_name.addWidget(label("ELO", "brand"))
-        brand_name.addWidget(label("ROBOTIC CARE", "sideMuted"))
-        brand_row.addLayout(brand_name)
-        brand_row.addStretch()
-        sidebar_layout.addLayout(brand_row)
-        sidebar_layout.addSpacing(26)
+        logo = QLabel()
+        logo_path = Path(__file__).parent / "assets" / "aegis_logo.png"
+        logo_image = QPixmap(str(logo_path))
+        if not logo_image.isNull():
+            # Enquadra o símbolo e o nome, preservando o PNG transparente.
+            logo_image = logo_image.copy(QRect(465, 65, 750, 780))
+            logo.setPixmap(logo_image.scaled(
+                166, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            ))
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setMinimumHeight(150)
+        sidebar_layout.addWidget(logo)
+        brand_subtitle = label("DESARME ROBÓTICO", "sideMuted")
+        brand_subtitle.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(brand_subtitle)
+        sidebar_layout.addSpacing(16)
 
         self.nav = []
         pages = [
             ("INÍCIO", ["Início"]),
             ("ESPAÇO DE TRABALHO", ["Dashboard", "Operação"]),
-            ("ACOMPANHAMENTO", ["Parâmetros", "Monitoramento", "Logs"]),
+            ("ACOMPANHAMENTO", ["Monitoramento"]),
             ("SISTEMA", ["Configurações"]),
         ]
         index = 0
@@ -191,14 +202,6 @@ class ELO(QWidget):
                 index += 1
 
         sidebar_layout.addStretch()
-        status_panel = QFrame()
-        status_panel.setObjectName("sideStatus")
-        status_layout = QVBoxLayout(status_panel)
-        status_layout.setContentsMargins(12, 11, 12, 11)
-        status_layout.setSpacing(4)
-        status_layout.addWidget(label("AMBIENTE", "sideMuted"))
-        status_layout.addWidget(label("●  Demonstração", "sideMuted"))
-        sidebar_layout.addWidget(status_panel)
         root.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
@@ -206,9 +209,7 @@ class ELO(QWidget):
         self.make_home()
         self.make_dashboard()
         self.make_operation()
-        self.make_parameters()
         self.make_monitoring()
-        self.make_logs()
         self.make_settings()
         self.show_page(0)
 
@@ -226,7 +227,6 @@ class ELO(QWidget):
         header_text.addWidget(label(title, "pageTitle"))
         header_text.addWidget(label(subtitle, "muted"))
         header.addLayout(header_text, 1)
-        header.addWidget(label("ⓘ  Modo Demonstração", "badge"), alignment=Qt.AlignTop)
         layout.addLayout(header)
 
         scroll.setWidget(body)
@@ -234,7 +234,7 @@ class ELO(QWidget):
         return layout
 
     def make_home(self):
-        layout = self.page("Menu inicial", "Escolha uma área para começar")
+        layout = self.page("Menu inicial", "Plataforma de inspeção robótica remota")
 
         hero = QFrame()
         hero.setObjectName("heroCard")
@@ -243,32 +243,32 @@ class ELO(QWidget):
         hero_layout.setSpacing(18)
         hero_text = QVBoxLayout()
         hero_text.setSpacing(8)
-        hero_text.addWidget(label("TECNOLOGIA QUE CONECTA. CUIDADO QUE APROXIMA.", "heroEyebrow"))
-        hero_text.addWidget(label("Bem-vinda ao ELO", "heroTitle"))
+        hero_text.addWidget(label("AEGIS  /  DEFESA ROBÓTICA", "heroEyebrow"))
+        hero_text.addWidget(label("Inspeção remota em cenários de risco", "heroTitle"))
         hero_text.addWidget(label(
-            "Explore a experiência Leader-Follower e acompanhe os dados da demonstração em um só lugar.",
+            "Acompanhe a plataforma Leader-Follower e visualize dados, câmeras e modelos em um só lugar.",
             "heroCopy",
         ))
         hero_layout.addLayout(hero_text, 1)
-        hero_button = QPushButton("Começar simulação  →")
+        hero_button = QPushButton("Abrir operação  →")
         hero_button.setObjectName("heroButton")
         hero_button.clicked.connect(lambda: self.show_page(2))
         hero_layout.addWidget(hero_button, alignment=Qt.AlignBottom)
         layout.addWidget(hero)
 
         menu_heading = QHBoxLayout()
-        menu_heading.addWidget(label("O que você quer fazer?", "robotName"), 1)
-        menu_heading.addWidget(label("ESCOLHA UMA ÁREA", "muted"))
+        menu_heading.addWidget(label("Acesse a central AEGIS", "robotName"), 1)
+        menu_heading.addWidget(label("ESCOLHA UMA ÁREA", "heroEyebrow"))
         layout.addLayout(menu_heading)
 
         tiles = QGridLayout()
         tiles.setHorizontalSpacing(14)
         tiles.setVerticalSpacing(14)
         menu_items = [
-            ("01", "Visão geral", "Veja o estado do sistema e os dois robôs.", 1),
-            ("02", "Operação", "Inicie, pause ou encerre a simulação.", 2),
-            ("03", "Monitoramento", "Acompanhe juntas, pose, forças e torques.", 4),
-            ("04", "Parâmetros", "Ajuste velocidade e escala da demonstração.", 3),
+            ("01", "Visão geral", "Veja o estado do sistema e dos robôs.", 1),
+            ("02", "Operação e parâmetros", "Controle a missão e ajuste velocidade e escala.", 2),
+            ("03", "Monitoramento", "Acompanhe juntas, pose, forças e torques.", 3),
+            ("04", "Configurações", "Consulte as informações do sistema.", 4),
         ]
         for index, (number, title, description, page_index) in enumerate(menu_items):
             tile = QFrame()
@@ -287,8 +287,7 @@ class ELO(QWidget):
         layout.addLayout(tiles)
 
         footer = QHBoxLayout()
-        footer.addWidget(label("UR3e Leader  ·  UR5e Follower", "muted"), 1)
-        footer.addWidget(label("MODO DE DEMONSTRAÇÃO", "badge"))
+        footer.addWidget(label("AEGIS  ·  UR3e Leader  →  UR5e Follower", "muted"), 1)
         layout.addLayout(footer)
         layout.addStretch()
 
@@ -319,13 +318,13 @@ class ELO(QWidget):
         return widget
 
     def make_dashboard(self):
-        layout = self.page("ELO", "Tecnologia que conecta. Cuidado que aproxima.")
+        layout = self.page("Dashboard", "Acompanhe o estado do sistema e dos robôs em tempo real.")
 
         # Painel de estado mais visível, com acesso direto à tela de operação.
         status_card, status_layout = card()
         status_header = QHBoxLayout()
         status_header.addWidget(label("Status do sistema", "robotName"), 1)
-        status_header.addWidget(label("SIMULAÇÃO", "badge"))
+        status_header.addWidget(label("MODO DEMONSTRAÇÃO", "badge"))
         status_layout.addLayout(status_header)
 
         status_row = QHBoxLayout()
@@ -347,15 +346,20 @@ class ELO(QWidget):
 
         self.robot_row = QHBoxLayout()
         self.robot_row.setSpacing(16)
-        self.robot_row.addWidget(self.robot_card("UR3e", "Leader • robô de referência"), 1)
-        self.robot_row.addWidget(self.robot_card("UR5e", "Follower • robô seguidor"), 1)
+        self.robot_row.addWidget(self.robot_card("UR3e", "Leader • robô de controle"), 1)
+        self.robot_row.addWidget(self.robot_card("UR5e", "Follower • robô manipulador"), 1)
         layout.addLayout(self.robot_row)
         layout.addStretch()
 
     def make_operation(self):
-        layout = self.page("Operação", "Controle simulado do sistema Leader-Follower")
+        layout = self.page(
+            "Operação",
+            "Controle da missão e ajuste dos parâmetros de movimento",
+        )
         widget, box = card()
         box.addWidget(label("Controle da operação", "robotName"))
+        self.operation_controls = QHBoxLayout()
+        self.operation_controls.setSpacing(10)
         for title, callback, object_name in [
             ("▶  Iniciar", self.start, "primary"),
             ("Ⅱ  Pausar / Retomar", self.pause, None),
@@ -366,7 +370,8 @@ class ELO(QWidget):
             if object_name:
                 button.setObjectName(object_name)
             button.clicked.connect(callback)
-            box.addWidget(button)
+            self.operation_controls.addWidget(button, 1)
+        box.addLayout(self.operation_controls)
         box.addWidget(label(
             "Home e os demais controles de Operação atuam somente na demonstração nesta versão.",
             "muted",
@@ -374,32 +379,35 @@ class ELO(QWidget):
         layout.addWidget(widget)
         self.operation_info = label("Operação parada. Nenhum robô real é controlado.", "badge")
         layout.addWidget(self.operation_info)
-        layout.addStretch()
 
-    def make_parameters(self):
-        layout = self.page("Parâmetros", "Ajustes utilizados somente na simulação")
-        widget, box = card()
-        box.addWidget(label("Velocidade simulada", "robotName"))
-        self.speed_label = label("50%")
-        box.addWidget(self.speed_label)
+        parameters_widget, parameters_box = card()
+        parameters_box.addWidget(label("Parâmetros da missão", "robotName"))
+        speed_header = QHBoxLayout()
+        speed_header.addWidget(label("Velocidade simulada", "sectionTitle"), 1)
+        self.speed_label = label("50%", "badge")
+        speed_header.addWidget(self.speed_label)
+        parameters_box.addLayout(speed_header)
         slider = QSlider(Qt.Horizontal)
         slider.setRange(5, 100)
         slider.setSingleStep(5)
         slider.setValue(50)
         slider.valueChanged.connect(self.change_speed)
-        box.addWidget(slider)
+        parameters_box.addWidget(slider)
 
-        box.addWidget(label("Escala de movimento", "robotName"))
-        buttons = QHBoxLayout()
+        parameters_box.addWidget(label("Escala de movimento", "sectionTitle"))
+        self.scale_controls = QHBoxLayout()
         self.scale_buttons = []
         for value in [0.5, 1.0, 2.0]:
             button = QPushButton(f'{str(value).replace(".", ",")}×')
             button.clicked.connect(lambda checked=False, scale=value: self.change_scale(scale))
-            buttons.addWidget(button)
+            self.scale_controls.addWidget(button)
             self.scale_buttons.append((value, button))
-        box.addLayout(buttons)
-        layout.addWidget(widget)
-        layout.addWidget(label("Os valores acima não alteram os limites de segurança dos robôs físicos.", "muted"))
+        parameters_box.addLayout(self.scale_controls)
+        parameters_box.addWidget(label(
+            "Os valores são usados somente na simulação e não alteram os limites de segurança dos robôs.",
+            "muted",
+        ))
+        layout.addWidget(parameters_widget)
         layout.addStretch()
         self.change_scale(1.0)
 
@@ -474,17 +482,6 @@ class ELO(QWidget):
             "muted",
         ))
 
-        gripper_demo_row = QHBoxLayout()
-        self.gripper_demo_button = QPushButton("Segure para abrir a garra (demo)")
-        self.gripper_demo_button.setObjectName("demo")
-        self.gripper_demo_button.setEnabled(False)
-        self.gripper_demo_button.pressed.connect(self.open_demo_gripper)
-        self.gripper_demo_button.released.connect(self.close_demo_gripper)
-        gripper_demo_row.addWidget(self.gripper_demo_button)
-        self.gripper_state_label = label("Garra do UR5e: fechada • demonstração", "badge")
-        gripper_demo_row.addWidget(self.gripper_state_label, 1)
-        visual_layout.addLayout(gripper_demo_row)
-
         self.expanded_camera = None
         self.view_splitter = QSplitter(Qt.Vertical)
         self.view_splitter.setChildrenCollapsible(False)
@@ -523,8 +520,8 @@ class ELO(QWidget):
         self.view_splitter.setStretchFactor(1, 2)
         visual_layout.addWidget(self.view_splitter, 1)
 
-        self.monitor_tabs.addTab(readings_tab, "Leituras")
-        self.monitor_tabs.addTab(visual_tab, "Visualização 3D + Câmeras")
+        self.monitor_tabs.addTab(readings_tab, "Telemetria")
+        self.monitor_tabs.addTab(visual_tab, "Câmeras e visualização 3D")
         layout.addWidget(self.monitor_tabs, 1)
         layout.addStretch()
         self.refresh_monitor()
@@ -561,13 +558,17 @@ class ELO(QWidget):
         )
 
         robot_tabs = QTabWidget()
+        self.focus_overlay.set_robot_pip(robot_tabs)
+        self.focus_robot_views.clear()
         for robot_name in ("UR3e", "UR5e"):
-            panel = self.robot_panels[robot_name]
-            self.visual_row.removeWidget(panel)
-            panel.setParent(None)
+            panel = QWidget(robot_tabs)
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(2, 2, 2, 2)
+            mini_view = RobotArmView(robot_name, parent=panel, compact=True)
+            self.focus_robot_views[robot_name] = mini_view
+            panel_layout.addWidget(mini_view)
             robot_tabs.addTab(panel, robot_name)
         self._focus_robot_tabs = robot_tabs
-        self.focus_overlay.set_robot_pip(robot_tabs)
 
         self.showFullScreen()
         self.sidebar.hide()
@@ -593,6 +594,7 @@ class ELO(QWidget):
     def exit_camera_focus(self):
         if not self.camera_focus_active:
             return
+        self.focus_overlay.hide_pips()
         main_panel = self.focus_overlay.take_main_widget()
         pip_camera = self.focus_overlay.take_camera_pip()
         robot_tabs = self.focus_overlay.take_robot_pip()
@@ -603,11 +605,8 @@ class ELO(QWidget):
             pip_camera.restore_normal_mode()
             self.camera_row.addWidget(pip_camera, 1)
         if robot_tabs is not None:
-            for _ in range(robot_tabs.count()):
-                panel = robot_tabs.widget(0)
-                robot_tabs.removeTab(0)
-                panel.setParent(None)
-                self.visual_row.addWidget(panel, 1)
+            self.focus_robot_views.clear()
+            robot_tabs.deleteLater()
 
         self.focus_overlay.hide()
         self.camera_focus_active = False
@@ -622,6 +621,7 @@ class ELO(QWidget):
         else:
             self.showNormal()
         self.view_splitter.setSizes([3, 2])
+        QTimer.singleShot(0, self.refresh_robot_views)
 
 
     def metric_tile(self, title, value, key):
@@ -680,14 +680,6 @@ class ELO(QWidget):
         layout.addWidget(self.monitor_section("Força e torque no TCP", wrench_metrics))
         return widget
 
-    def make_logs(self):
-        layout = self.page("Logs", "Eventos da demonstração")
-        widget, box = card()
-        self.log_text = label("Sistema iniciado em modo demonstração.")
-        box.addWidget(self.log_text)
-        layout.addWidget(widget)
-        layout.addStretch()
-
     def make_settings(self):
         layout = self.page("Configurações", "Informações gerais do protótipo")
         widget, box = card()
@@ -739,10 +731,6 @@ class ELO(QWidget):
         self.running = True
         self.paused = False
         self.gripper_position = 255
-        self.gripper_target = 255
-        self.gripper_previous_position = 255
-        self.gripper_demo_button.setEnabled(True)
-        self.refresh_gripper_state("Demonstração")
         self.update_simulation()
         self.set_state("Demonstração em andamento")
         self.telemetry_status.setText("Demonstração ativa • dados simulados • sem robôs")
@@ -810,8 +798,8 @@ class ELO(QWidget):
             item.setText("Movimento: simulado" if self.running and not self.paused else "Movimento: parado")
 
     def add_log(self, text):
-        old_lines = self.log_text.text().split("\n")
-        self.log_text.setText("\n".join((old_lines + [text])[-12:]))
+        self.log_entries.append(text)
+        self.log_entries = self.log_entries[-100:]
 
     def tick(self):
         if self.telemetry_source is not None:
@@ -854,10 +842,6 @@ class ELO(QWidget):
             source.read()  # valida a leitura inicial antes de mudar o estado da UI
             self.set_telemetry_source(source)
             self.disconnect_button.setEnabled(True)
-            self.gripper_demo_button.setEnabled(False)
-            self.gripper_state_label.setText(
-                "Garra: gPO não disponível na leitura RTDE atual"
-            )
             self.telemetry_status.setText("Conectado • telemetria real, somente leitura")
             for source_label in self.source_labels:
                 source_label.setText("RTDE • leitura real, somente leitura")
@@ -879,13 +863,6 @@ class ELO(QWidget):
             self.connect_button.setEnabled(True)
             self.disconnect_button.setEnabled(False)
             self.telemetry_status.setText(status)
-            self.gripper_demo_button.setEnabled(self.running)
-            if self.running:
-                self.refresh_gripper_state("Demonstração")
-            else:
-                self.gripper_state_label.setText(
-                    "Garra: estado simulado • inicie a demo para testar"
-                )
             for source_label in self.source_labels:
                 source_label.setText("Dados simulados • modo demonstração")
             for status_label in self.status_labels:
@@ -904,7 +881,6 @@ class ELO(QWidget):
             400 + self.scale * dz,
         ]
         self.update_simulated_feedback()
-        self.advance_demo_gripper()
 
     def update_from_telemetry(self):
         """Atualiza a interface com uma fonte RTDE somente de leitura."""
@@ -915,41 +891,6 @@ class ELO(QWidget):
             pose = sample.tcp_pose_m_rad
             self.positions[name] = [pose[0] * 1000, pose[1] * 1000, pose[2] * 1000, *pose[3:]]
             self.wrenches[name] = list(sample.tcp_wrench_n_nm)
-
-    def open_demo_gripper(self):
-        """Botão pressionado: abre a garra apenas na demonstração 3D."""
-        if not self.running or self.telemetry_source is not None:
-            return
-        self.gripper_target = 0
-
-    def close_demo_gripper(self):
-        """Botão solto: fecha a garra apenas na demonstração 3D."""
-        if not self.running or self.telemetry_source is not None:
-            return
-        self.gripper_target = 255
-
-    def advance_demo_gripper(self):
-        if self.telemetry_source is not None:
-            return
-        previous = self.gripper_position
-        step = 16
-        if previous < self.gripper_target:
-            self.gripper_position = min(self.gripper_target, previous + step)
-        elif previous > self.gripper_target:
-            self.gripper_position = max(self.gripper_target, previous - step)
-        if self.gripper_position != previous:
-            direction = "Abrindo" if self.gripper_position < previous else "Fechando"
-            if self.gripper_position == 0:
-                direction = "Aberta"
-            elif self.gripper_position == 255:
-                direction = "Fechada"
-            self.refresh_gripper_state(direction)
-
-    def refresh_gripper_state(self, state):
-        percent_closed = round(100 * self.gripper_position / 255)
-        self.gripper_state_label.setText(
-            f"Garra do UR5e: {state} • {percent_closed}% fechada • demo"
-        )
 
     def set_telemetry_source(self, source):
         """Injeta um leitor já conectado. Não conecta automaticamente ao robô."""
@@ -1015,9 +956,14 @@ class ELO(QWidget):
     def refresh_robot_views(self):
         for name, view in self.robot_views.items():
             view.set_joint_angles(self.joint_angles[name])
+        for name, view in self.focus_robot_views.items():
+            view.set_joint_angles(self.joint_angles[name])
         follower_view = self.robot_views.get("UR5e")
         if follower_view is not None:
             follower_view.set_gripper_position(self.gripper_position)
+        focus_follower = self.focus_robot_views.get("UR5e")
+        if focus_follower is not None:
+            focus_follower.set_gripper_position(self.gripper_position)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1033,11 +979,15 @@ class ELO(QWidget):
                 self.visual_row.setDirection(direction)
             if hasattr(self, "camera_row"):
                 self.camera_row.setDirection(direction)
+            if hasattr(self, "operation_controls"):
+                self.operation_controls.setDirection(direction)
+            if hasattr(self, "scale_controls"):
+                self.scale_controls.setDirection(direction)
             self.sidebar.setFixedWidth(170 if narrow else 222)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ELO()
+    window = AegisApp()
     window.show()
     sys.exit(app.exec())

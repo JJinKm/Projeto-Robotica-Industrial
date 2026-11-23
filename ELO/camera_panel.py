@@ -1,4 +1,4 @@
-"""Painel de vídeo USB embutido na interface ELO."""
+"""Painel de vídeo USB embutido na interface AEGIS."""
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices
@@ -52,7 +52,7 @@ class CameraPanel(QFrame):
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(200)
         self.video_widget.setAspectRatioMode(Qt.KeepAspectRatio)
-        self.video_widget.setStyleSheet("background:#14232D; border-radius:10px;")
+        self.video_widget.setStyleSheet("background:#07170F; border:1px solid #214832; border-radius:10px;")
         layout.addWidget(self.video_widget, 1)
 
         self.status_label = QLabel("Câmera fechada • selecione um dispositivo USB")

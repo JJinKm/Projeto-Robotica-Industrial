@@ -1,11 +1,11 @@
 # Projeto de Robótica Industrial
 
-Interface ELO para demonstração Leader–Follower com UR3e (Leader) e UR5e (Follower).
+Interface AEGIS para inspeção robótica remota, com UR3e (Leader) e UR5e (Follower).
 
 ## Abrir no Windows
 
 1. Instale o Python 3.12 (64 bits) e clone ou baixe esta branch do repositório.
-2. Na pasta `Projeto-Robotica-Industrial`, dê dois cliques em **`Iniciar_ELO.bat`**.
+2. Na pasta `Projeto-Robotica-Industrial`, dê dois cliques em **`Iniciar_ELO.bat`** para abrir o AEGIS.
 3. Na primeira abertura, o iniciador cria um ambiente Python curto em `%LOCALAPPDATA%\ELO\elo-rtde-env`, instala as dependências listadas em `requirements.txt` e baixa as malhas 3D UR3e/UR5e para `%LOCALAPPDATA%\ELO\models`. Essa etapa precisa de internet.
 4. Nas próximas vezes, dê dois cliques no mesmo arquivo.
 
@@ -26,10 +26,10 @@ Se o ambiente já estiver preparado, basta ativá-lo e executar o último comand
 
 ## Visualização e telemetria
 
-O painel Monitoramento tem duas abas: **Leituras**, com ângulos das juntas, pose TCP e força/torque; e **Visualização 3D + Câmeras**, com os modelos UR detalhados e duas prévias USB embutidas (webcam e câmera da garra). Clique em **Testar demo 3D** para animar os robôs com dados simulados, sem conectar nem enviar comandos aos robôs físicos. Tudo permanece dentro da janela do ELO. Arraste a divisória para ajustar o espaço entre o modelo 3D e os vídeos; use **Ampliar** para dar mais espaço a uma câmera dentro da aba e **Voltar** para restaurar a composição. As câmeras aparecem na lista quando o Windows as reconhece; selecione uma e clique em **Abrir câmera**. Cada prévia começa fechada.
+O AEGIS usa uma identidade visual verde-escura e tem as áreas Início, Dashboard, Operação (com parâmetros), Monitoramento e Configurações. Na tela **Operação**, os controles de missão e os ajustes de velocidade e escala ficam juntos. O painel Monitoramento tem duas abas: **Telemetria**, com ângulos das juntas, pose TCP e força/torque; e **Câmeras e visualização 3D**, com os modelos UR e duas prévias USB embutidas (webcam e câmera da garra). Clique em **Testar demo 3D** para animar os robôs com dados simulados, sem conectar nem enviar comandos aos robôs físicos. Arraste a divisória para ajustar o espaço entre o modelo 3D e os vídeos; use **Ampliar** para abrir uma câmera em tela cheia e **Voltar** para restaurar a composição. As câmeras aparecem na lista quando o Windows as reconhece; selecione uma e clique em **Abrir câmera**. Cada prévia começa fechada.
 
-Ao ampliar uma câmera, a interface entra em tela cheia e oculta a barra lateral. A outra câmera e os modelos dos dois robôs aparecem em janelas PiP que podem ser arrastadas e redimensionadas; clique em **Ampliar** na outra câmera PiP para torná-la a principal. Pressione **Esc** ou use **Voltar ao monitoramento** para sair. Na tela Operação, **Home (demo)** retorna os modelos simulados à pose inicial; não envia movimento aos robôs físicos.
+Ao ampliar uma câmera, a interface entra em tela cheia e oculta a barra lateral. A outra câmera e os modelos dos dois robôs aparecem em janelas PiP independentes que podem ser arrastadas e redimensionadas, inclusive para um segundo monitor. Clique em **Ampliar** na outra câmera PiP para torná-la a principal. Pressione **Esc** ou use **Voltar ao monitoramento** para sair. Na tela Operação, **Home (demo)** retorna os modelos simulados à pose inicial; não envia movimento aos robôs físicos.
 
 Os arquivos visuais são baixados do repositório oficial [Universal_Robots_ROS2_Description](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description), que contém os modelos e a licença aplicável. A postura 3D acompanha os ângulos simulados ou lidos pelo RTDE. O posicionamento dos elos segue a cadeia de juntas e as origens visuais do URDF; os robôs físicos podem ter diferenças de calibração.
 
-O adaptador `ELO/rtde_telemetry.py` usa `RTDEReceive` para consultar dados. Não importa nem executa `ur_rtde.py`, e não envia comandos de movimento. A leitura real depende de o computador estar na rede dos controladores e de os endereços IP estarem corretos. Os botões da tela Operação controlam somente a simulação.
+O adaptador `ELO/rtde_telemetry.py` usa `RTDEReceive` para consultar dados. Não importa nem executa `ur_rtde.py`, e não envia comandos de movimento. A leitura real depende de o computador estar na rede dos controladores e de os endereços IP estarem corretos. Os botões da tela Operação controlam somente a simulação. A logo AEGIS fica em `ELO/assets/aegis_logo.png`.

@@ -1,7 +1,7 @@
 """Leitura de telemetria RTDE sem comandos de movimento.
 
 Este módulo não abre conexões ao ser importado ou instanciado. A conexão só
-acontece quando connect() é chamado explicitamente. A interface ELO continua
+acontece quando connect() é chamado explicitamente. A interface AEGIS continua
 usando dados simulados por padrão.
 """
 

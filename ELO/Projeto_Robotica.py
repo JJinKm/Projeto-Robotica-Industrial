@@ -2,7 +2,7 @@ import math
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtCore import Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
     QStackedWidget,
     QSplitter,
     QTabWidget,
@@ -82,8 +82,6 @@ QPushButton#danger { background:#321817; color:#FF7770; border:1px solid #A83C35
 QPushButton#selected { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
 QLineEdit, QComboBox { background:#07170F; color:#EDF5ED; border:1px solid #31553A; border-radius:8px; padding:9px 10px; selection-background-color:#4C8C2E; }
 QComboBox QAbstractItemView { background:#0A2117; color:#EDF5ED; selection-background-color:#28562B; border:1px solid #31553A; }
-QSlider::groove:horizontal { height:7px; background:#24432E; border-radius:3px; }
-QSlider::handle:horizontal { background:#9AF13A; border:2px solid #D4FF9F; width:17px; margin:-6px 0; border-radius:8px; }
 """
 
 
@@ -105,6 +103,11 @@ def card():
 
 
 class AegisApp(QWidget):
+    # Sinais públicos para integração futura com o controlador do Joshua.
+    iniciar_solicitado = Signal()
+    pausar_retomar_solicitado = Signal()
+    home_solicitado = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AEGIS | Desarme robótico")
@@ -115,7 +118,6 @@ class AegisApp(QWidget):
         self.running = False
         self.paused = False
         self.t = 0.0
-        self.speed = 50
         self.scale = 1.0
         # Posição inicial visual da garra no modelo 3D; ainda não é gPO real.
         self.gripper_position = 255
@@ -266,7 +268,7 @@ class AegisApp(QWidget):
         tiles.setVerticalSpacing(14)
         menu_items = [
             ("01", "Visão geral", "Veja o estado do sistema e dos robôs.", 1),
-            ("02", "Operação e parâmetros", "Controle a missão e ajuste velocidade e escala.", 2),
+            ("02", "Operação e parâmetros", "Controle a missão e ajuste a escala.", 2),
             ("03", "Monitoramento", "Acompanhe juntas, pose, forças e torques.", 3),
             ("04", "Configurações", "Consulte as informações do sistema.", 4),
         ]
@@ -340,7 +342,7 @@ class AegisApp(QWidget):
         status_row.addWidget(operation_button)
         status_layout.addLayout(status_row)
 
-        self.summary_params = label("Velocidade: 50%     |     Escala: 1,0×", "muted")
+        self.summary_params = label("Escala de movimento: 1,0×", "muted")
         status_layout.addWidget(self.summary_params)
         layout.addWidget(status_card)
 
@@ -360,20 +362,21 @@ class AegisApp(QWidget):
         box.addWidget(label("Controle da operação", "robotName"))
         self.operation_controls = QHBoxLayout()
         self.operation_controls.setSpacing(10)
-        for title, callback, object_name in [
-            ("▶  Iniciar", self.start, "primary"),
-            ("Ⅱ  Pausar / Retomar", self.pause, None),
-            ("■  Parar", self.stop, "danger"),
-            ("⌂  Home (demo)", self.move_simulated_home, None),
-        ]:
-            button = QPushButton(title)
-            if object_name:
-                button.setObjectName(object_name)
-            button.clicked.connect(callback)
-            self.operation_controls.addWidget(button, 1)
+        self.botao_iniciar = QPushButton("▶  Iniciar")
+        self.botao_iniciar.setObjectName("primary")
+        self.botao_iniciar.clicked.connect(self._solicitar_inicio)
+        self.operation_controls.addWidget(self.botao_iniciar, 1)
+
+        self.botao_pausar_retomar = QPushButton("Ⅱ  Pausar / Retomar")
+        self.botao_pausar_retomar.clicked.connect(self._solicitar_pausa_retomada)
+        self.operation_controls.addWidget(self.botao_pausar_retomar, 1)
+
+        self.botao_home = QPushButton("⌂  Home")
+        self.botao_home.clicked.connect(self._confirmar_home)
+        self.operation_controls.addWidget(self.botao_home, 1)
         box.addLayout(self.operation_controls)
         box.addWidget(label(
-            "Home e os demais controles de Operação atuam somente na demonstração nesta versão.",
+            "Os botões ainda não enviam comandos aos robôs físicos. Home pede confirmação antes de solicitar a ação.",
             "muted",
         ))
         layout.addWidget(widget)
@@ -382,18 +385,6 @@ class AegisApp(QWidget):
 
         parameters_widget, parameters_box = card()
         parameters_box.addWidget(label("Parâmetros da missão", "robotName"))
-        speed_header = QHBoxLayout()
-        speed_header.addWidget(label("Velocidade simulada", "sectionTitle"), 1)
-        self.speed_label = label("50%", "badge")
-        speed_header.addWidget(self.speed_label)
-        parameters_box.addLayout(speed_header)
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(5, 100)
-        slider.setSingleStep(5)
-        slider.setValue(50)
-        slider.valueChanged.connect(self.change_speed)
-        parameters_box.addWidget(slider)
-
         parameters_box.addWidget(label("Escala de movimento", "sectionTitle"))
         self.scale_controls = QHBoxLayout()
         self.scale_buttons = []
@@ -694,11 +685,6 @@ class AegisApp(QWidget):
         for page_index, button in enumerate(self.nav):
             button.setChecked(page_index == index)
 
-    def change_speed(self, value):
-        self.speed = value
-        self.speed_label.setText(f"{value}%")
-        self.update_summary()
-
     def change_scale(self, value):
         self.scale = value
         for scale, button in self.scale_buttons:
@@ -710,7 +696,31 @@ class AegisApp(QWidget):
     def update_summary(self):
         if hasattr(self, "summary_params"):
             scale = str(self.scale).replace(".", ",")
-            self.summary_params.setText(f"Velocidade: {self.speed}%     |     Escala: {scale}×")
+            self.summary_params.setText(f"Escala de movimento: {scale}×")
+
+    def _solicitar_inicio(self):
+        """Emite o evento de interface e atualiza a demonstração local."""
+        self.iniciar_solicitado.emit()
+        self.start()
+
+    def _solicitar_pausa_retomada(self):
+        """Emite o evento de interface e alterna a demonstração local."""
+        self.pausar_retomar_solicitado.emit()
+        self.pause()
+
+    def _confirmar_home(self):
+        resposta = QMessageBox.question(
+            self,
+            "Confirmar Home",
+            "Deseja solicitar o retorno à posição Home?\n\n"
+            "Nesta versão, a ação atualiza somente a demonstração; "
+            "nenhum comando é enviado aos robôs físicos.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resposta == QMessageBox.Yes:
+            self.home_solicitado.emit()
+            self.move_simulated_home()
 
     def start(self):
         if self.telemetry_source is not None:
@@ -752,17 +762,6 @@ class AegisApp(QWidget):
         state = "Simulação pausada" if self.paused else "Simulação em andamento"
         self.set_state(state)
         self.add_log("Simulação pausada" if self.paused else "Simulação retomada")
-
-    def stop(self):
-        if self.telemetry_source is not None:
-            self.operation_info.setText(
-                "Parar simulação não desconecta o RTDE. Use Desconectar em Monitoramento."
-            )
-            return
-        self.running = False
-        self.paused = False
-        self.set_state("Operação parada")
-        self.add_log("Simulação parada")
 
     def move_simulated_home(self):
         """Retorna a postura da demonstração à pose inicial definida na UI."""
@@ -870,7 +869,7 @@ class AegisApp(QWidget):
         self.add_log("Telemetria RTDE desconectada")
 
     def update_simulation(self):
-        self.t += 0.1 * self.speed / 50
+        self.t += 0.1
         dx = 35 * math.sin(self.t * 0.7)
         dy = 25 * math.cos(self.t * 0.5)
         dz = 18 * math.sin(self.t * 0.4)

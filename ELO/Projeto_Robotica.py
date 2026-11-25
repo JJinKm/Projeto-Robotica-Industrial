@@ -1,7 +1,10 @@
 import math
 import sys
 import time
+from collections import deque
 from pathlib import Path
+
+import pyqtgraph as pg
 
 from PySide6.QtCore import Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
@@ -137,6 +140,7 @@ class AegisApp(QWidget):
     pausar_retomar_solicitado = Signal()
     home_solicitado = Signal()
     parar_solicitado = Signal()
+    recalibrar_solicitado = Signal()
 
     def __init__(self):
         super().__init__()
@@ -439,7 +443,16 @@ class AegisApp(QWidget):
         box.addLayout(indicators)
         layout.addWidget(widget)
 
-        # Monitoramento (telemetria, modelos 3D e câmeras) fica na mesma tela.
+        # Destaque: o que o operador olha durante a manipulação.
+        self.camera_panels = []
+        self.camera_home = {}
+        self.destaque_row = QHBoxLayout()
+        self.destaque_row.setSpacing(16)
+        self._add_camera_panel("Câmera da garra", self.destaque_row, stretch=3)
+        self.destaque_row.addWidget(self._build_force_card(), 2)
+        layout.addLayout(self.destaque_row)
+
+        # Monitoramento (telemetria, modelos 3D e webcam) fica na mesma tela.
         self.build_monitoring(layout)
 
         log_widget, log_box = card()
@@ -463,6 +476,94 @@ class AegisApp(QWidget):
 
         self.operation_state = None
         self.apply_operation_state("desconectado")
+
+    # --- Gráfico de força ----------------------------------------------------
+    JANELA_GRAFICO = 10.0  # s
+
+    def _build_force_card(self):
+        widget, box = card()
+        header = QHBoxLayout()
+        header.addWidget(label("Força de contato", "sectionTitle"), 1)
+        self.botao_recalibrar = QPushButton("Zerar e recalibrar")
+        self.botao_recalibrar.setFocusPolicy(Qt.NoFocus)
+        self.botao_recalibrar.setToolTip(
+            "Zera o sensor do leader e mede de novo o viés do follower, sem Home. "
+            "Não encoste nos robôs por ~2 s."
+        )
+        self.botao_recalibrar.clicked.connect(self.recalibrar_solicitado.emit)
+        header.addWidget(self.botao_recalibrar)
+        box.addLayout(header)
+
+        self.force_samples = deque(maxlen=400)
+        pg.setConfigOptions(antialias=True)
+        self.force_plot_area = pg.GraphicsLayoutWidget()
+        self.force_plot_area.setBackground("#07170F")
+        self.force_plot_area.setMinimumHeight(240)
+        eixo = {"color": "#A0B5A5", "font-size": "11px"}
+
+        def grafico(linha, titulo, unidade):
+            plot = self.force_plot_area.addPlot(row=linha, col=0)
+            plot.setTitle(titulo, color="#CFE0D2", size="10pt")
+            plot.setLabel("left", unidade, **eixo)
+            plot.showGrid(x=True, y=True, alpha=0.15)
+            plot.setMouseEnabled(x=False, y=False)
+            plot.hideButtons()
+            plot.setXRange(-self.JANELA_GRAFICO, 0, padding=0)
+            for nome in ("left", "bottom"):
+                plot.getAxis(nome).setPen("#2A4A35")
+                plot.getAxis(nome).setTextPen("#A0B5A5")
+            return plot
+
+        self.plot_follower = grafico(0, "Estimada no follower (UR5)", "N")
+        self.curva_follower = self.plot_follower.plot(pen=pg.mkPen("#91EA32", width=2))
+        self.linha_zona_morta = pg.InfiniteLine(
+            angle=0, pen=pg.mkPen("#FFCF66", width=1, style=Qt.DashLine),
+            label="zona morta", labelOpts={"color": "#FFCF66", "position": 0.12, "anchors": [(0, 1), (0, 1)]},
+        )
+        self.plot_follower.addItem(self.linha_zona_morta)
+        self.plot_reflexao = grafico(1, "Refletida no leader (o que a mão sente)", "N")
+        self.plot_reflexao.setXLink(self.plot_follower)
+        self.plot_reflexao.setLabel("bottom", "s", **eixo)
+        self.curva_reflexao = self.plot_reflexao.plot(
+            pen=pg.mkPen("#FFCF66", width=2), fillLevel=0, brush=pg.mkBrush(255, 207, 102, 40)
+        )
+        box.addWidget(self.force_plot_area, 1)
+
+        self.force_hint = label("A força aparece depois do Home e da calibração.", "muted")
+        box.addWidget(self.force_hint)
+        self._aplicar_escala_grafico()
+        return widget
+
+    def _aplicar_escala_grafico(self):
+        zona = self.config["zona_morta_reflexao"]
+        self.linha_zona_morta.setPos(zona)
+        self.plot_follower.setYRange(0, max(60.0, zona * 2.5), padding=0)
+        self.plot_reflexao.setYRange(0, max(1.0, self.config["fmax_reflexao"]), padding=0.05)
+
+    def add_force_sample(self, t, f_follower, f_reflexao):
+        self.force_samples.append((t, f_follower, f_reflexao))
+
+    def clear_force_samples(self):
+        self.force_samples.clear()
+        self.curva_follower.setData([], [])
+        self.curva_reflexao.setData([], [])
+        self.force_hint.show()
+        self._aplicar_escala_grafico()
+
+    def refresh_force_plot(self):
+        if not self.force_samples or not self.force_plot_area.isVisible():
+            return
+        self.force_hint.hide()
+        agora = self.force_samples[-1][0]
+        xs = [t - agora for t, _, _ in self.force_samples if agora - t <= self.JANELA_GRAFICO]
+        n = len(xs)
+        dados = list(self.force_samples)[-n:]
+        self.curva_follower.setData(xs, [f for _, f, _ in dados])
+        self.curva_reflexao.setData(xs, [r for _, _, r in dados])
+        # Contato forte: amplia a escala sem perder a linha da zona morta.
+        pico = max(f for _, f, _ in dados)
+        topo = max(60.0, self.config["zona_morta_reflexao"] * 2.5, pico * 1.15)
+        self.plot_follower.setYRange(0, topo, padding=0)
 
     # --- Estado da operação --------------------------------------------------
     STATE_TEXT = {
@@ -489,6 +590,9 @@ class AegisApp(QWidget):
         self.botao_pausar_retomar.setEnabled(state in ("acompanhando", "pausado"))
         self.botao_pausar_retomar.setText("Retomar  (P)" if state == "pausado" else "Pausar  (P)")
         self.botao_parar.setEnabled(not desligado and state != "parando")
+        self.botao_recalibrar.setEnabled(state == "acompanhando")
+        if state in ("conectando", "home"):
+            self.clear_force_samples()
         # IPs só podem mudar com os robôs desconectados.
         self.ur3e_ip.setEnabled(desligado)
         self.ur5e_ip.setEnabled(desligado)
@@ -609,16 +713,12 @@ class AegisApp(QWidget):
         visualization_layout.addLayout(self.visual_row)
         self.view_splitter.addWidget(self.visualization_card)
 
+        # A câmera da garra fica em destaque no topo da Operação; aqui só a webcam.
         self.cameras_card, cameras_layout = card()
-        cameras_layout.addWidget(label("Câmeras USB", "sectionTitle"))
+        cameras_layout.addWidget(label("Webcam", "sectionTitle"))
         self.camera_row = QHBoxLayout()
         self.camera_row.setSpacing(12)
-        self.camera_panels = []
-        for title in ("Webcam", "Câmera da garra"):
-            camera_panel = CameraPanel(title)
-            camera_panel.expandRequested.connect(self.toggle_camera_expansion)
-            self.camera_panels.append(camera_panel)
-            self.camera_row.addWidget(camera_panel, 1)
+        self._add_camera_panel("Webcam", self.camera_row)
         cameras_layout.addLayout(self.camera_row)
         self.view_splitter.addWidget(self.cameras_card)
         self.view_splitter.setStretchFactor(0, 3)
@@ -626,11 +726,22 @@ class AegisApp(QWidget):
         visual_layout.addWidget(self.view_splitter, 1)
 
         self.monitor_tabs.addTab(readings_tab, "Telemetria")
-        self.monitor_tabs.addTab(visual_tab, "Câmeras e visualização 3D")
+        self.monitor_tabs.addTab(visual_tab, "Modelos 3D e webcam")
         layout.addWidget(self.monitor_tabs, 1)
         layout.addStretch()
         self.refresh_monitor()
         self.refresh_robot_views()
+
+    def _add_camera_panel(self, title, row, index=-1, stretch=1):
+        """Cria um painel de câmera e lembra onde ele mora (para voltar da tela cheia)."""
+        camera_panel = CameraPanel(title)
+        camera_panel.expandRequested.connect(self.toggle_camera_expansion)
+        self.camera_panels.append(camera_panel)
+        if index < 0:
+            index = row.count()
+        row.insertWidget(index, camera_panel, stretch)
+        self.camera_home[camera_panel] = (row, index, stretch)
+        return camera_panel
 
     def toggle_camera_expansion(self, selected_panel):
         """Abre a câmera em tela cheia ou alterna qual câmera fica principal."""
@@ -650,8 +761,8 @@ class AegisApp(QWidget):
         self.expanded_camera = selected_panel
         other_panel = next(panel for panel in self.camera_panels if panel is not selected_panel)
 
-        self.camera_row.removeWidget(selected_panel)
-        self.camera_row.removeWidget(other_panel)
+        for panel in (selected_panel, other_panel):
+            self.camera_home[panel][0].removeWidget(panel)
         selected_panel.setParent(None)
         other_panel.setParent(None)
         selected_panel.set_focus_mode("main")
@@ -703,12 +814,12 @@ class AegisApp(QWidget):
         main_panel = self.focus_overlay.take_main_widget()
         pip_camera = self.focus_overlay.take_camera_pip()
         robot_tabs = self.focus_overlay.take_robot_pip()
-        if main_panel is not None:
-            main_panel.restore_normal_mode()
-            self.camera_row.addWidget(main_panel, 1)
-        if pip_camera is not None:
-            pip_camera.restore_normal_mode()
-            self.camera_row.addWidget(pip_camera, 1)
+        # Cada câmera volta para o seu lugar (destaque ou aba), na mesma posição.
+        voltar = [p for p in (main_panel, pip_camera) if p is not None]
+        for panel in sorted(voltar, key=lambda p: self.camera_home[p][1]):
+            panel.restore_normal_mode()
+            row, index, stretch = self.camera_home[panel]
+            row.insertWidget(min(index, row.count()), panel, stretch)
         if robot_tabs is not None:
             self.focus_robot_views.clear()
             robot_tabs.deleteLater()
@@ -845,6 +956,8 @@ class AegisApp(QWidget):
              "Maior: responde mais rápido ao empurrão (acima de 1 pode oscilar)."),
             ("Força para guiar", numero("f_entra_force", "N", 1, 0.1, ""),
              "Acima disso o leader sai do teach mode e passa a seguir a mão."),
+            ("Força para soltar", numero("f_sai_force", "N", 1, 0.1, ""),
+             "Abaixo disso o leader volta ao teach mode (parado). Fica abaixo da força para guiar."),
         ])
 
         self.reflexao_ativa = QCheckBox("Ativada")
@@ -857,6 +970,9 @@ class AegisApp(QWidget):
              "Forças menores são ruído da estimativa do UR5 e são ignoradas."),
             ("Força máxima", numero("fmax_reflexao", "N", 1, 0.5, ""),
              "Limite da força aplicada no leader."),
+            ("Esquecer contato", numero("tau_vies_parado", "s", 1, 0.5, ""),
+             "0 = desligado (recomendado). Com valor, um contato mantido com o follower "
+             "parado some da mão nesse tempo, mas surge um empurrão contrário ao soltar."),
         ])
         layout.addWidget(self.settings_panel)
 
@@ -908,6 +1024,7 @@ class AegisApp(QWidget):
             self.settings_status.setText(f"Não foi possível salvar: {error}")
             return
         self._mostrar_configuracoes(self.config)
+        self._aplicar_escala_grafico()
         self.settings_status.setText(f"Salvo às {time.strftime('%H:%M:%S')}. Vale a partir do próximo Iniciar.")
         self.add_log("Configurações salvas.")
 
@@ -964,6 +1081,7 @@ class AegisApp(QWidget):
         self.refresh_values()
         self.refresh_monitor()
         self.refresh_robot_views()
+        self.refresh_force_plot()
 
     def connect_telemetry(self):
         """Conecta aos dois robôs apenas para receber dados, sem comandos."""
@@ -1111,6 +1229,8 @@ class AegisApp(QWidget):
                 empilhar(self.visual_row, 720)
             if hasattr(self, "camera_row"):
                 empilhar(self.camera_row, 980)
+            if hasattr(self, "destaque_row"):
+                empilhar(self.destaque_row, 900)
             if hasattr(self, "operation_controls"):
                 empilhar(self.operation_controls, 560)
 

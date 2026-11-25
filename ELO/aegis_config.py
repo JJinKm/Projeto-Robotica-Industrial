@@ -18,10 +18,14 @@ PADROES = {
     "amortecimento": 0.015,         # 0..1
     "ganho_forca": 2.0,             # 0..2
     "f_entra_force": 1.1,           # N
+    "f_sai_force": 0.6,             # N
     "reflexao": True,
     "k_reflexao": 0.1,              # N no leader por N no follower
-    "zona_morta_reflexao": 30.0,    # N
+    "zona_morta_reflexao": 60.0,    # N (gravação real: falsos contatos até ~53 N)
     "fmax_reflexao": 10.0,          # N
+    # s; 0 = desligado. Ligado, um contato mantido some da mão e, ao soltar,
+    # aparece um empurrão contrário: por isso fica desligado por padrão.
+    "tau_vies_parado": 0.0,
 }
 
 # (mínimo, máximo) para os números; protege contra valores perigosos.
@@ -29,6 +33,8 @@ LIMITES = {
     "amortecimento": (0.0, 1.0),
     "ganho_forca": (0.0, 2.0),
     "f_entra_force": (0.2, 20.0),
+    "f_sai_force": (0.1, 15.0),
+    "tau_vies_parado": (0.0, 30.0),
     "k_reflexao": (0.0, 0.5),
     "zona_morta_reflexao": (0.0, 200.0),
     "fmax_reflexao": (0.0, 20.0),

@@ -23,10 +23,12 @@ try:  # Permite executar como arquivo ou importar como pacote.
     from . import aegis_config
     from .Projeto_Robotica import AegisApp
     from .rtde_telemetry import RobotTelemetry
+    from .sensor_leader import ModeloSensorLeader
 except ImportError:
     import aegis_config
     from Projeto_Robotica import AegisApp
     from rtde_telemetry import RobotTelemetry
+    from sensor_leader import ModeloSensorLeader
 
 
 # --- Configuração do controle (valores do ur_rtde.py) ----------------------
@@ -40,6 +42,30 @@ VMAX_ROT = 0.8         # rad/s
 
 # Reflexão de força follower -> leader (estimativa do CB3, ruído 15-40 N).
 ALFA_REFLEXAO = 0.1         # filtro (menor = mais suave)
+# Viés adaptativo da estimativa do follower (valores tirados de uma gravação
+# real: o viés muda de 8 a 60 N entre poses e o atrito parado segura ~55 N).
+TAU_VIES_MOVENDO = 0.5      # s    viés acompanha a pose enquanto o follower se move
+V_ADAPTA_VIES = 0.02        # m/s  acima disso o follower está "se movendo"
+TAXA_VIES = 80.0            # N/s  limite de variação do viés (picos não o arrastam)
+V_IGNORA_FORCA = 0.12       # m/s  acima disso a estimativa tem picos de até 270 N
+
+
+# Orientações (Δq4, Δq5, Δq6 em rad) para medir o desvio do sensor do leader.
+VARREDURA_PUNHO = [
+    (0.0, 0.0, 0.0),
+    (0.6, 0.0, 0.0), (-0.6, 0.0, 0.0),
+    (0.0, 0.5, 0.0), (0.0, -0.5, 0.0),
+    (0.0, 0.0, 1.2), (0.0, 0.0, -1.2),
+    (0.4, 0.4, 0.8), (-0.4, -0.4, -0.8),
+]
+
+
+def _perto_singularidade(q, pose_tcp) -> bool:
+    """Leader perto de singularidade de punho, cotovelo ou ombro."""
+    punho = abs(math.sin(q[4])) < 0.17       # q5 a menos de ~10° de 0/180°
+    cotovelo = abs(math.sin(q[2])) < 0.17    # braço quase esticado
+    ombro = math.hypot(pose_tcp[0], pose_tcp[1]) < 0.08  # TCP sobre a base
+    return punho or cotovelo or ombro
 T_CALIBRACAO = 1.5          # s
 
 # Garra: botão na entrada digital 16 do leader (ferramenta).
@@ -76,10 +102,12 @@ class _JoshuaRTDEWorker(QThread):
     state_changed = Signal(str)
     info_changed = Signal(dict)         # indicadores: leader, força, reflexão, garra
     telemetry_changed = Signal(dict)    # {"UR3e": (q, pose, wrench), "UR5e": (...)}
+    forca_changed = Signal(float, float, float)  # t, |F follower| sem viés, força refletida
 
     def __init__(self, master_ip: str, follower_ip: str, cfg: dict | None = None):
         super().__init__()
         self.cfg = dict(cfg) if cfg is not None else aegis_config.carregar()
+        self.modelo_leader = ModeloSensorLeader()
         self._mr = self._fr = None
         self._proxima_telemetria = 0.0
         self.master_ip = master_ip
@@ -105,6 +133,9 @@ class _JoshuaRTDEWorker(QThread):
 
     def request_home(self):
         self._commands.put("home")
+
+    def request_recalibrate(self):
+        self._commands.put("recalibrar")
 
     # --- auxiliares --------------------------------------------------------
     def _status(self, texto, nivel="info"):
@@ -151,10 +182,9 @@ class _JoshuaRTDEWorker(QThread):
             except Exception:
                 pass
 
-    def _mover_home(self, ctrl, nome):
+    def _mover_juntas(self, ctrl, q, nome, vel=VEL_HOME, acel=ACEL_HOME):
         """moveJ assíncrono: Parar interrompe o movimento com stopJ."""
-        self._status(f"Movendo o {nome} para Home...")
-        ctrl.moveJ(JOINT_HOME, VEL_HOME, ACEL_HOME, True)
+        ctrl.moveJ(list(q), vel, acel, True)
         time.sleep(0.1)
         while ctrl.getAsyncOperationProgressEx().isAsyncOperationRunning():
             self._emitir_telemetria()
@@ -162,8 +192,48 @@ class _JoshuaRTDEWorker(QThread):
                 ctrl.stopJ(2.0)
                 raise _ParadaSolicitada()
             if not ctrl.isProgramRunning():
-                raise RuntimeError(f"O script do {nome} parou durante o Home (protective stop?).")
+                raise RuntimeError(f"O script do {nome} parou durante o movimento (protective stop?).")
             time.sleep(0.02)
+
+    def _mover_home(self, ctrl, nome):
+        self._status(f"Movendo o {nome} para Home...")
+        self._mover_juntas(ctrl, JOINT_HOME, nome)
+
+    def _varrer_sensor_leader(self, mc, mr):
+        """Gira o punho do leader por algumas orientações e mede o desvio do sensor.
+
+        Com as amostras paradas, ajusta o modelo F_falsa = a + R·b
+        (sensor_leader.py). O leader volta à pose inicial no fim; o follower
+        fica parado (não está servoando).
+        """
+        self._status(
+            "Medindo o sensor do leader: o punho do UR3e vai girar um pouco. "
+            "Não encoste nos robôs (~15 s)...", "aviso"
+        )
+        q0 = list(mr.getActualQ())
+        usa_q5 = abs(math.sin(q0[4])) > 0.5  # não gira o q5 perto da singularidade
+        self.modelo_leader.limpar()
+        for d4, d5, d6 in VARREDURA_PUNHO:
+            if (d5 and not usa_q5):
+                continue
+            q = q0[:3] + [q0[3] + d4, q0[4] + d5, q0[5] + d6]
+            self._mover_juntas(mc, q, "UR3e (leader)", vel=1.0, acel=1.5)
+            time.sleep(0.4)  # deixa assentar
+            forcas, t_fim = [], time.monotonic() + 0.3
+            while time.monotonic() < t_fim:
+                forcas.append(mr.getActualTCPForce()[:3])
+                time.sleep(0.008)
+            media = [sum(f[i] for f in forcas) / len(forcas) for i in range(3)]
+            self.modelo_leader.adicionar(mr.getActualTCPPose(), media)
+        self._mover_juntas(mc, q0, "UR3e (leader)", vel=1.0, acel=1.5)
+        if self.modelo_leader.ajustar():
+            erro = self.modelo_leader.erro_rms
+            nivel = "info" if erro < 0.4 else "aviso"
+            self._status(
+                f"Sensor do leader medido: desvio corrigido com erro de {erro:.2f} N."
+                + ("" if erro < 0.4 else " Erro alto: confira o payload do UR3e no pendant."),
+                nivel,
+            )
 
     # --- Leader: force mode + reflexão de força (mesma lógica do ur_rtde.py) ---
     def _passo_forca(self, mc, w_lin=(0.0, 0.0, 0.0)):
@@ -175,10 +245,28 @@ class _JoshuaRTDEWorker(QThread):
             [VMAX_LIN] * 3 + [VMAX_ROT] * 3,    # limites de velocidade
         )
 
-    def _forca_reflexao(self, fr, f_filt, vies):
-        f = [a - b for a, b in zip(fr.getActualTCPForce()[:3], vies)]
+    def _forca_reflexao(self, fr, f_filt, vies, dt):
+        """Força de contato estimada no follower e a força refletida no leader.
+
+        A estimativa do UR5 (CB3) vem das correntes dos motores e erra com a
+        pose (viés diferente em cada pose) e com o atrito parado. Por isso o
+        viés se adapta: rápido enquanto o follower se move livre, devagar
+        quando parado. Contatos curtos passam; um contato mantido some aos
+        poucos (tempo "tau_vies_parado" em Configurações). Em movimento
+        rápido a estimativa não é confiável e é ignorada.
+        """
+        bruto = fr.getActualTCPForce()[:3]
+        v = math.sqrt(sum(x * x for x in fr.getActualTCPSpeed()[:3]))
+        tau = TAU_VIES_MOVENDO if v > V_ADAPTA_VIES else self.cfg["tau_vies_parado"]
+        if tau > 0:
+            for i in range(3):
+                passo = (bruto[i] - vies[i]) * min(dt / tau, 1.0)
+                vies[i] += max(-TAXA_VIES * dt, min(TAXA_VIES * dt, passo))
+        f = [a - b for a, b in zip(bruto, vies)]
         f_filt = [(1 - ALFA_REFLEXAO) * a + ALFA_REFLEXAO * b for a, b in zip(f_filt, f)]
         norma = math.sqrt(sum(x * x for x in f_filt))
+        if v > V_IGNORA_FORCA:
+            norma = 0.0
         c = self.cfg
         mag = min(c["k_reflexao"] * max(norma - c["zona_morta_reflexao"], 0.0), c["fmax_reflexao"])
         w = [mag * x / norma for x in f_filt] if mag > 0 else [0.0, 0.0, 0.0]
@@ -276,6 +364,12 @@ class _JoshuaRTDEWorker(QThread):
             gain = 300
             paused_on_robot = False
             next_info_at = 0.0
+            proximo_grafico = 0.0
+            t_ultimo_ciclo = None
+            leader_parado_desde = None
+            ultimo_zero_lider = 0.0      # última amostra parada do sensor do leader
+            ultimo_ajuste_modelo = 0.0
+            ultimo_aviso_sing = 0.0
 
             # Estado da reflexão de força (recalibrado a cada Home/retomada).
             f_filt = [0.0, 0.0, 0.0]
@@ -313,6 +407,7 @@ class _JoshuaRTDEWorker(QThread):
                         time.sleep(0.5)
                         master_control.zeroFtSensor()
                         time.sleep(0.2)
+                        self._varrer_sensor_leader(master_control, master_receive)
                         master_control.forceModeSetDamping(self.cfg["amortecimento"])
                         master_control.forceModeSetGainScaling(self.cfg["ganho_forca"])
                         reiniciar_calibracao()
@@ -325,6 +420,21 @@ class _JoshuaRTDEWorker(QThread):
                     paused_on_robot = False
                     self._estado("acompanhando")
                     self._status("Home concluído; o UR5 está acompanhando o UR3e.")
+
+                if (command == "recalibrar" and MODO_GUIA == "forca"
+                        and self._tracking_ready.is_set() and not self._pause_requested.is_set()):
+                    # Zera o sensor do leader e mede de novo o viés do follower,
+                    # sem precisar de um Home completo.
+                    self._status("Recalibrando: não encoste nos robôs...", "aviso")
+                    if servo_active:
+                        follower_control.servoStop()
+                        servo_active = False
+                    leader_parado()
+                    time.sleep(0.5)
+                    master_control.zeroFtSensor()
+                    time.sleep(0.2)
+                    self._varrer_sensor_leader(master_control, master_receive)
+                    reiniciar_calibracao()
 
                 if not self._tracking_ready.is_set():
                     self.msleep(20)
@@ -381,39 +491,93 @@ class _JoshuaRTDEWorker(QThread):
                             vies_follower = [sum(a[i] for a in amostras_vies) / n for i in range(3)]
                             self._info_set(reflexao="inativa")
                             self._status("Calibração concluída. Reflexão de força ativa.")
-                        if teach_mode:
-                            master_control.endTeachMode()
-                            teach_mode = False
-                        self._passo_forca(master_control)
-                        force_mode = True
-                        self._info_set(leader="força")
-                    elif self.cfg["reflexao"]:
-                        w_ref, f_filt, f_mag, mag_ref = self._forca_reflexao(
-                            follower_receive, f_filt, vies_follower
-                        )
-                        f_lider = math.sqrt(
-                            sum(x * x for x in master_receive.getActualTCPForce()[:3])
-                        )
-                        # Mão no leader -> force mode; senão teach mode, que não deriva parado.
-                        if f_lider > self.cfg["f_entra_force"]:
-                            if teach_mode:
-                                master_control.endTeachMode()
-                                teach_mode = False
-                            self._passo_forca(master_control, w_ref)
-                            force_mode = True
-                            self._info_set(leader="força")
-                        elif not teach_mode:
+                        # Durante a calibração o leader fica em teach mode (parado):
+                        # em force mode o desvio do sensor dele o faria andar sozinho.
+                        if not teach_mode:
                             if force_mode:
                                 master_control.forceModeStop()
                                 force_mode = False
                             master_control.teachMode()
                             teach_mode = True
                             self._info_set(leader="teach")
-                        self._info_set(reflexao="refletindo" if mag_ref > 0 else "inativa")
                     else:
-                        self._passo_forca(master_control)
-                        force_mode = True
-                        self._info_set(leader="força")
+                        agora = time.monotonic()
+                        dt_ciclo = min(agora - t_ultimo_ciclo, 0.1) if t_ultimo_ciclo else dt
+                        t_ultimo_ciclo = agora
+                        if self.cfg["reflexao"]:
+                            w_ref, f_filt, f_mag, mag_ref = self._forca_reflexao(
+                                follower_receive, f_filt, vies_follower, dt_ciclo
+                            )
+                        else:
+                            w_ref, mag_ref = (0.0, 0.0, 0.0), 0.0
+
+                        # Força da mão no leader, sem o desvio do sensor (que muda
+                        # com a orientação; modelo medido no Home).
+                        pose_lider = master_receive.getActualTCPPose()
+                        f_bruta_lider = master_receive.getActualTCPForce()[:3]
+                        f_corr_lider = self.modelo_leader.corrigir(pose_lider, f_bruta_lider)
+                        f_lider = float(math.sqrt(sum(x * x for x in f_corr_lider)))
+                        # Histerese: entra em force mode acima de "força para guiar" e
+                        # só sai abaixo de "força para soltar". Sem a mão, o leader
+                        # fica em teach mode, que não anda sozinho.
+                        f_entra = self.cfg["f_entra_force"]
+                        f_sai = min(self.cfg["f_sai_force"], 0.8 * f_entra)
+                        mao = f_lider > (f_sai if force_mode else f_entra)
+
+                        # Perto de singularidade o force mode pode disparar o
+                        # leader; nesse caso fica em teach mode (move só à mão).
+                        if mao and _perto_singularidade(joint_master, pose_lider):
+                            mao = False
+                            if agora - ultimo_aviso_sing > 3.0:
+                                ultimo_aviso_sing = agora
+                                self._status(
+                                    "Leader perto de uma singularidade: força desligada. "
+                                    "Afaste-o à mão (teach mode).", "aviso"
+                                )
+
+                        if mao:
+                            if teach_mode:
+                                master_control.endTeachMode()
+                                teach_mode = False
+                            self._passo_forca(master_control, w_ref)
+                            force_mode = True
+                            leader_parado_desde = None
+                            self._info_set(leader="força")
+                        else:
+                            if not teach_mode:
+                                if force_mode:
+                                    master_control.forceModeStop()
+                                    force_mode = False
+                                master_control.teachMode()
+                                teach_mode = True
+                                leader_parado_desde = None
+                                self._info_set(leader="teach")
+                            # Leader parado e sem mão: a leitura é só o desvio do
+                            # sensor nessa orientação. Vira amostra do modelo, que
+                            # assim acompanha poses novas e o aquecimento do sensor.
+                            v_lider = math.sqrt(
+                                sum(x * x for x in master_receive.getActualTCPSpeed()[:3])
+                            )
+                            if v_lider < 0.003:
+                                if leader_parado_desde is None:
+                                    leader_parado_desde = agora
+                                elif (agora - leader_parado_desde > 0.5
+                                      and agora - ultimo_zero_lider > 0.5
+                                      and f_lider < 2.0):
+                                    self.modelo_leader.adicionar(pose_lider, f_bruta_lider, fixa=False)
+                                    ultimo_zero_lider = agora
+                                    if agora - ultimo_ajuste_modelo > 1.0:
+                                        self.modelo_leader.ajustar()
+                                        ultimo_ajuste_modelo = agora
+                            else:
+                                leader_parado_desde = None
+
+                        refletindo = mao and mag_ref > 0
+                        if self.cfg["reflexao"]:
+                            self._info_set(reflexao="refletindo" if refletindo else "inativa")
+                            if agora >= proximo_grafico:  # 20 Hz para o gráfico de força
+                                proximo_grafico = agora + 0.05
+                                self.forca_changed.emit(agora, f_mag, mag_ref if mao else 0.0)
 
                 # Se o script de algum robô morreu (ex.: protective stop), para tudo.
                 if not (master_control.isProgramRunning() and follower_control.isProgramRunning()):
@@ -468,6 +632,7 @@ class JoshuaController(QObject):
     state_changed = Signal(str)
     info_changed = Signal(dict)
     telemetry_changed = Signal(dict)
+    forca_changed = Signal(float, float, float)
 
     def __init__(self, master_ip: str, follower_ip: str):
         super().__init__()
@@ -487,6 +652,7 @@ class JoshuaController(QObject):
         self.worker.state_changed.connect(self.state_changed)
         self.worker.info_changed.connect(self.info_changed)
         self.worker.telemetry_changed.connect(self.telemetry_changed)
+        self.worker.forca_changed.connect(self.forca_changed)
         self.worker.finished.connect(self._ao_terminar)
         self.state_changed.emit("conectando")
         self.worker.start()
@@ -504,6 +670,10 @@ class JoshuaController(QObject):
     def ir_para_home(self):
         if self.ativo():
             self.worker.request_home()
+
+    def recalibrar(self):
+        if self.ativo():
+            self.worker.request_recalibrate()
 
     def parar(self):
         """Não bloqueia a interface: o worker encerra e emite o estado final."""
@@ -555,6 +725,8 @@ class AegisRTDEApp(AegisApp):
         self.controlador.state_changed.connect(self.apply_operation_state)
         self.controlador.info_changed.connect(self.set_indicators)
         self.controlador.telemetry_changed.connect(self._receber_telemetria)
+        self.controlador.forca_changed.connect(self.add_force_sample)
+        self.recalibrar_solicitado.connect(self.controlador.recalibrar)
         self.controlador.state_changed.connect(self._ao_mudar_estado)
         self._telemetria = _TelemetriaDoControle()
 

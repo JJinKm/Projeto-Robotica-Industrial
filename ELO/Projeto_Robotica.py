@@ -1,9 +1,10 @@
 import math
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QRect, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -31,8 +33,8 @@ except ImportError:
     from focus_overlay import CameraFocusOverlay
 
 
-# Interface AEGIS. A telemetria continua opcional e os controles de movimento
-# permanecem simulados; este arquivo não envia comandos de movimento ao RTDE.
+# Interface AEGIS (tela). Este arquivo não envia comandos de movimento ao RTDE;
+# o controle dos robôs fica em AEGIS_RTDE.py.
 STYLE = """
 QWidget { background:#06140F; color:#F0F6F1; font-family:'Segoe UI'; font-size:14px; }
 QFrame#sidebar { background:#04100C; border:1px solid #173A28; border-radius:20px; }
@@ -74,11 +76,22 @@ QPushButton#nav:hover { background:#10291A; color:#F4F8F3; }
 QPushButton#nav:checked { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
 QPushButton#primary { background:#91EA32; color:#10200D; border:0; font-weight:750; }
 QPushButton#primary:hover { background:#A5F54A; }
-QPushButton#demo { background:#112A1C; color:#B5FF5B; border:1px solid #47763B; }
 QPushButton#heroButton { background:#9AF13A; color:#11210D; border:0; border-radius:12px; padding:12px 18px; font-weight:750; }
 QPushButton#heroButton:hover { background:#B0FF5E; }
 QPushButton#tileButton { text-align:left; background:transparent; border:0; color:#A9F046; padding:4px 0; }
-QPushButton#danger { background:#321817; color:#FF7770; border:1px solid #A83C35; }
+QPushButton#danger { background:#5A1A16; color:#FFE3E0; border:1px solid #D9534A; font-weight:750; }
+QPushButton#danger:hover { background:#7A231D; border-color:#FF7770; }
+QPushButton#danger:disabled { background:#1A1110; color:#6E5654; border-color:#3A2422; }
+QPushButton#primary:disabled { background:#1C2E18; color:#5E7A55; }
+QLabel#badge[nivel="aviso"] { background:#33270C; color:#FFCF66; border-color:#8A6A1F; }
+QLabel#badge[nivel="erro"] { background:#3A1412; color:#FF9C95; border-color:#A83C35; }
+QLabel#stateChip { border-radius:10px; padding:5px 11px; font-size:12px; font-weight:800; letter-spacing:1px; background:#13241A; color:#A0B5A5; border:1px solid #2A4A35; }
+QLabel#stateChip[nivel="info"] { background:#123522; color:#B5FF5B; border-color:#28633C; }
+QLabel#stateChip[nivel="ok"] { background:#91EA32; color:#10200D; border-color:#91EA32; }
+QLabel#stateChip[nivel="aviso"] { background:#33270C; color:#FFCF66; border-color:#8A6A1F; }
+QLabel#stateChip[nivel="erro"] { background:#D9534A; color:#FFFFFF; border-color:#D9534A; }
+QPlainTextEdit#eventLog { background:#07170F; color:#CFE0D2; border:1px solid #244B33; border-radius:10px; padding:8px; font-family:Consolas; font-size:12px; }
+QLineEdit:disabled { color:#7E9585; border-color:#1B3524; }
 QPushButton#selected { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
 QLineEdit, QComboBox { background:#07170F; color:#EDF5ED; border:1px solid #31553A; border-radius:8px; padding:9px 10px; selection-background-color:#4C8C2E; }
 QComboBox QAbstractItemView { background:#0A2117; color:#EDF5ED; selection-background-color:#28562B; border:1px solid #31553A; }
@@ -107,6 +120,7 @@ class AegisApp(QWidget):
     iniciar_solicitado = Signal()
     pausar_retomar_solicitado = Signal()
     home_solicitado = Signal()
+    parar_solicitado = Signal()
 
     def __init__(self):
         super().__init__()
@@ -115,10 +129,6 @@ class AegisApp(QWidget):
         self.setMinimumSize(690, 480)
         self.setStyleSheet(STYLE)
 
-        self.running = False
-        self.paused = False
-        self.t = 0.0
-        self.scale = 1.0
         # Posição inicial visual da garra no modelo 3D; ainda não é gPO real.
         self.gripper_position = 255
         self.positions = {
@@ -133,8 +143,7 @@ class AegisApp(QWidget):
             "UR3e": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "UR5e": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         }
-        # None mantém a aplicação estritamente no modo simulado.
-        # Um adaptador RTDE só pode ser fornecido e conectado explicitamente.
+        # Leitor RTDE; conectado pelo botão Iniciar.
         self.telemetry_source = None
         self.values = {}
         self.monitor_values = {}
@@ -188,7 +197,6 @@ class AegisApp(QWidget):
         pages = [
             ("INÍCIO", ["Início"]),
             ("ESPAÇO DE TRABALHO", ["Dashboard", "Operação"]),
-            ("ACOMPANHAMENTO", ["Monitoramento"]),
             ("SISTEMA", ["Configurações"]),
         ]
         index = 0
@@ -211,7 +219,6 @@ class AegisApp(QWidget):
         self.make_home()
         self.make_dashboard()
         self.make_operation()
-        self.make_monitoring()
         self.make_settings()
         self.show_page(0)
 
@@ -268,9 +275,8 @@ class AegisApp(QWidget):
         tiles.setVerticalSpacing(14)
         menu_items = [
             ("01", "Visão geral", "Veja o estado do sistema e dos robôs.", 1),
-            ("02", "Operação e parâmetros", "Controle a missão e ajuste a escala.", 2),
-            ("03", "Monitoramento", "Acompanhe juntas, pose, forças e torques.", 3),
-            ("04", "Configurações", "Consulte as informações do sistema.", 4),
+            ("02", "Operação", "Controle os robôs e acompanhe telemetria, 3D e câmeras.", 2),
+            ("03", "Configurações", "Consulte as informações do sistema.", 3),
         ]
         for index, (number, title, description, page_index) in enumerate(menu_items):
             tile = QFrame()
@@ -297,13 +303,11 @@ class AegisApp(QWidget):
         widget, layout = card()
         layout.addWidget(label(name, "robotName"))
         layout.addWidget(label(role, "muted"))
-        layout.addWidget(label("Estado: disponível no simulador"))
-        layout.addWidget(label("Conexão física: desativada", "muted"))
         motion = label("Movimento: parado")
         layout.addWidget(motion)
         self.status_labels.append(motion)
         layout.addSpacing(8)
-        layout.addWidget(label("TCP • valores simulados", "muted"))
+        layout.addWidget(label("TCP", "muted"))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -326,12 +330,11 @@ class AegisApp(QWidget):
         status_card, status_layout = card()
         status_header = QHBoxLayout()
         status_header.addWidget(label("Status do sistema", "robotName"), 1)
-        status_header.addWidget(label("MODO DEMONSTRAÇÃO", "badge"))
         status_layout.addLayout(status_header)
 
         status_row = QHBoxLayout()
         status_text = QVBoxLayout()
-        self.summary = label("Simulação pronta • operação parada", "statusValue")
+        self.summary = label("Operação parada", "statusValue")
         self.summary.setObjectName("statusValue")
         status_text.addWidget(self.summary)
         status_text.addWidget(label("UR3e Leader  →  UR5e Follower", "muted"))
@@ -341,9 +344,6 @@ class AegisApp(QWidget):
         operation_button.clicked.connect(lambda: self.show_page(2))
         status_row.addWidget(operation_button)
         status_layout.addLayout(status_row)
-
-        self.summary_params = label("Escala de movimento: 1,0×", "muted")
-        status_layout.addWidget(self.summary_params)
         layout.addWidget(status_card)
 
         self.robot_row = QHBoxLayout()
@@ -356,58 +356,161 @@ class AegisApp(QWidget):
     def make_operation(self):
         layout = self.page(
             "Operação",
-            "Controle da missão e ajuste dos parâmetros de movimento",
+            "Controle da missão, telemetria, modelos 3D e câmeras",
         )
         widget, box = card()
-        box.addWidget(label("Controle da operação", "robotName"))
+        header = QHBoxLayout()
+        header.addWidget(label("Controle da operação", "robotName"), 1)
+        self.state_chip = QLabel()
+        self.state_chip.setObjectName("stateChip")
+        header.addWidget(self.state_chip, 0, Qt.AlignVCenter)
+        box.addLayout(header)
+
         self.operation_controls = QHBoxLayout()
         self.operation_controls.setSpacing(10)
-        self.botao_iniciar = QPushButton("▶  Iniciar")
+        self.botao_iniciar = QPushButton("Iniciar")
         self.botao_iniciar.setObjectName("primary")
         self.botao_iniciar.clicked.connect(self._solicitar_inicio)
         self.operation_controls.addWidget(self.botao_iniciar, 1)
 
-        self.botao_pausar_retomar = QPushButton("Ⅱ  Pausar / Retomar")
+        self.botao_home = QPushButton("Home")
+        self.botao_home.clicked.connect(self._confirmar_home)
+        self.operation_controls.addWidget(self.botao_home, 1)
+
+        self.botao_pausar_retomar = QPushButton("Pausar  (P)")
         self.botao_pausar_retomar.clicked.connect(self._solicitar_pausa_retomada)
         self.operation_controls.addWidget(self.botao_pausar_retomar, 1)
 
-        self.botao_home = QPushButton("⌂  Home")
-        self.botao_home.clicked.connect(self._confirmar_home)
-        self.operation_controls.addWidget(self.botao_home, 1)
+        self.botao_parar = QPushButton("Parar  (Espaço)")
+        self.botao_parar.setObjectName("danger")
+        self.botao_parar.clicked.connect(self._solicitar_parada)
+        self.operation_controls.addWidget(self.botao_parar, 1)
+        for botao in (self.botao_iniciar, self.botao_home, self.botao_pausar_retomar, self.botao_parar):
+            # Sem foco: Espaço nunca "clica" o botão focado em vez de parar.
+            botao.setFocusPolicy(Qt.NoFocus)
         box.addLayout(self.operation_controls)
         box.addWidget(label(
             "Os botões ainda não enviam comandos aos robôs físicos. Home pede confirmação antes de solicitar a ação.",
             "muted",
         ))
+
+        self.operation_info = label("Operação parada.", "badge")
+        self.operation_info.setProperty("nivel", "info")
+        box.addWidget(self.operation_info)
+
+        indicators = QGridLayout()
+        indicators.setHorizontalSpacing(8)
+        indicators.setVerticalSpacing(8)
+        self.indicator_values = {}
+        for col, (key, caption) in enumerate((
+            ("leader", "Leader"),
+            ("f_follower", "Força no follower"),
+            ("reflexao", "Reflexão de força"),
+            ("garra", "Garra"),
+        )):
+            tile = QFrame()
+            tile.setObjectName("metricTile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(10, 8, 10, 8)
+            tile_layout.setSpacing(3)
+            tile_layout.addWidget(label(caption, "metricCaption"))
+            value = label("—", "metricValue")
+            tile_layout.addWidget(value)
+            self.indicator_values[key] = value
+            indicators.addWidget(tile, col // 4, col % 4)
+        box.addLayout(indicators)
         layout.addWidget(widget)
-        self.operation_info = label("Operação parada. Nenhum robô real é controlado.", "badge")
-        layout.addWidget(self.operation_info)
 
-        parameters_widget, parameters_box = card()
-        parameters_box.addWidget(label("Parâmetros da missão", "robotName"))
-        parameters_box.addWidget(label("Escala de movimento", "sectionTitle"))
-        self.scale_controls = QHBoxLayout()
-        self.scale_buttons = []
-        for value in [0.5, 1.0, 2.0]:
-            button = QPushButton(f'{str(value).replace(".", ",")}×')
-            button.clicked.connect(lambda checked=False, scale=value: self.change_scale(scale))
-            self.scale_controls.addWidget(button)
-            self.scale_buttons.append((value, button))
-        parameters_box.addLayout(self.scale_controls)
-        parameters_box.addWidget(label(
-            "Os valores são usados somente na simulação e não alteram os limites de segurança dos robôs.",
-            "muted",
-        ))
-        layout.addWidget(parameters_widget)
-        layout.addStretch()
-        self.change_scale(1.0)
+        # Monitoramento (telemetria, modelos 3D e câmeras) fica na mesma tela.
+        self.build_monitoring(layout)
 
-    def make_monitoring(self):
-        layout = self.page(
-            "Monitoramento",
-            "Leituras, modelo 3D e câmeras em uma única tela",
-        )
+        log_widget, log_box = card()
+        log_box.addWidget(label("Registro de eventos", "sectionTitle"))
+        self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("eventLog")
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(300)
+        self.log_view.setMinimumHeight(150)
+        self.log_view.setFocusPolicy(Qt.NoFocus)
+        log_box.addWidget(self.log_view)
+        layout.addWidget(log_widget)
 
+        # Atalhos de segurança valem em qualquer tela, inclusive na câmera em foco.
+        atalho_parar = QShortcut(QKeySequence(Qt.Key_Space), self)
+        atalho_parar.setContext(Qt.ApplicationShortcut)
+        atalho_parar.activated.connect(self._atalho_parar)
+        atalho_pausa = QShortcut(QKeySequence(Qt.Key_P), self)
+        atalho_pausa.setContext(Qt.ApplicationShortcut)
+        atalho_pausa.activated.connect(self._atalho_pausa)
+
+        self.operation_state = None
+        self.apply_operation_state("desconectado")
+
+    # --- Estado da operação --------------------------------------------------
+    STATE_TEXT = {
+        "desconectado": ("Desconectado", "neutro"),
+        "conectando": ("Conectando", "aviso"),
+        "conectado": ("Conectado", "info"),
+        "home": ("Indo para Home", "aviso"),
+        "acompanhando": ("Acompanhando", "ok"),
+        "pausado": ("Pausado", "aviso"),
+        "parando": ("Parando", "aviso"),
+        "erro": ("Erro", "erro"),
+    }
+
+    def apply_operation_state(self, state):
+        """Habilita só os botões que fazem sentido no estado atual."""
+        self.operation_state = state
+        texto, nivel = self.STATE_TEXT.get(state, (state, "neutro"))
+        self.state_chip.setText(texto.upper())
+        self._set_level(self.state_chip, nivel)
+
+        desligado = state in ("desconectado", "erro")
+        self.botao_iniciar.setEnabled(desligado)
+        self.botao_home.setEnabled(state in ("conectado", "acompanhando", "pausado"))
+        self.botao_pausar_retomar.setEnabled(state in ("acompanhando", "pausado"))
+        self.botao_pausar_retomar.setText("Retomar  (P)" if state == "pausado" else "Pausar  (P)")
+        self.botao_parar.setEnabled(not desligado and state != "parando")
+        # IPs só podem mudar com os robôs desconectados.
+        self.ur3e_ip.setEnabled(desligado)
+        self.ur5e_ip.setEnabled(desligado)
+        if desligado:
+            self.set_indicators({})  # sem controle ativo, nada a indicar
+        self.summary.setText(texto)
+        for item in self.status_labels:
+            item.setText(f"Operação: {texto.lower()}")
+
+    def set_message(self, text, nivel="info"):
+        self.operation_info.setText(text)
+        self._set_level(self.operation_info, nivel)
+
+    def set_indicators(self, info):
+        f = info.get("f_follower")
+        valores = {
+            "leader": info.get("leader", "—"),
+            "f_follower": "—" if f is None else f"{f:.0f} N",
+            "reflexao": info.get("reflexao", "—"),
+            "garra": info.get("garra", "—"),
+        }
+        for key, value in valores.items():
+            self.indicator_values[key].setText(str(value).capitalize() if key != "f_follower" else value)
+
+    @staticmethod
+    def _set_level(widget, nivel):
+        widget.setProperty("nivel", nivel)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _atalho_parar(self):
+        if self.botao_parar.isEnabled():
+            self._solicitar_parada()
+
+    def _atalho_pausa(self):
+        if self.botao_pausar_retomar.isEnabled():
+            self._solicitar_pausa_retomada()
+
+    def build_monitoring(self, layout):
+        """Monta telemetria, modelos 3D e câmeras dentro do layout da Operação."""
         self.monitor_tabs = QTabWidget()
         readings_tab = QWidget()
         readings_layout = QVBoxLayout(readings_tab)
@@ -417,7 +520,7 @@ class AegisApp(QWidget):
         connection_card, connection_layout = card()
         connection_layout.addWidget(label("Fonte das leituras", "sectionTitle"))
         connection_layout.addWidget(label(
-            "Conecte em modo somente leitura para exibir medidas dos robôs. Nenhum comando de movimento é enviado.",
+            "O botão Iniciar também conecta a leitura das medidas dos robôs (somente leitura).",
             "muted",
         ))
         connection_layout.addWidget(label(
@@ -436,19 +539,7 @@ class AegisApp(QWidget):
         connection_layout.addLayout(address_row)
 
         action_row = QHBoxLayout()
-        self.connect_button = QPushButton("Conectar para ler medidas")
-        self.connect_button.setObjectName("primary")
-        self.connect_button.clicked.connect(self.connect_telemetry)
-        self.demo_button = QPushButton("Testar demo 3D")
-        self.demo_button.setObjectName("demo")
-        self.demo_button.clicked.connect(self.start_demo)
-        self.disconnect_button = QPushButton("Desconectar")
-        self.disconnect_button.setEnabled(False)
-        self.disconnect_button.clicked.connect(self.disconnect_telemetry)
-        action_row.addWidget(self.connect_button)
-        action_row.addWidget(self.demo_button)
-        action_row.addWidget(self.disconnect_button)
-        self.telemetry_status = label("Desconectado • exibindo dados simulados", "badge")
+        self.telemetry_status = label("Desconectado • pressione Iniciar", "badge")
         action_row.addWidget(self.telemetry_status, 1)
         connection_layout.addLayout(action_row)
         readings_layout.addWidget(connection_card)
@@ -459,7 +550,7 @@ class AegisApp(QWidget):
         self.monitor_row.addWidget(self.monitor_robot_card("UR5e", "FOLLOWER"), 1)
         readings_layout.addLayout(self.monitor_row)
         readings_layout.addWidget(label(
-            "Com RTDE conectado, as leituras são reais e somente de leitura. Sem conexão, os valores são simulados.",
+            "As leituras vêm dos robôs via RTDE, somente leitura.",
             "muted",
         ))
         readings_layout.addStretch()
@@ -649,7 +740,7 @@ class AegisApp(QWidget):
         header.addWidget(label(name, "robotName"), 1)
         header.addWidget(label(role, "roleBadge"))
         layout.addLayout(header)
-        source_label = label("Dados simulados • modo demonstração", "muted")
+        source_label = label("Sem leitura • pressione Iniciar", "muted")
         self.source_labels.append(source_label)
         layout.addWidget(source_label)
 
@@ -675,8 +766,8 @@ class AegisApp(QWidget):
         layout = self.page("Configurações", "Informações gerais do protótipo")
         widget, box = card()
         box.addWidget(label("Conexão dos robôs", "robotName"))
-        box.addWidget(label("As leituras RTDE são configuradas na tela Monitoramento."))
-        box.addWidget(label("A interface usa somente RTDEReceive para telemetria; os botões de operação continuam simulados.", "muted"))
+        box.addWidget(label("As leituras RTDE são configuradas na tela Operação."))
+        box.addWidget(label("O botão Iniciar conecta o controle dos robôs e a leitura RTDE.", "muted"))
         layout.addWidget(widget)
         layout.addStretch()
 
@@ -685,120 +776,35 @@ class AegisApp(QWidget):
         for page_index, button in enumerate(self.nav):
             button.setChecked(page_index == index)
 
-    def change_scale(self, value):
-        self.scale = value
-        for scale, button in self.scale_buttons:
-            button.setObjectName("selected" if scale == value else "")
-            button.style().unpolish(button)
-            button.style().polish(button)
-        self.update_summary()
-
-    def update_summary(self):
-        if hasattr(self, "summary_params"):
-            scale = str(self.scale).replace(".", ",")
-            self.summary_params.setText(f"Escala de movimento: {scale}×")
-
     def _solicitar_inicio(self):
-        """Emite o evento de interface e atualiza a demonstração local."""
+        """Emite o evento de interface e conecta a telemetria."""
         self.iniciar_solicitado.emit()
-        self.start()
+        self.connect_telemetry()
 
     def _solicitar_pausa_retomada(self):
-        """Emite o evento de interface e alterna a demonstração local."""
         self.pausar_retomar_solicitado.emit()
-        self.pause()
+
+    def _solicitar_parada(self):
+        self.parar_solicitado.emit()
 
     def _confirmar_home(self):
         resposta = QMessageBox.question(
             self,
             "Confirmar Home",
-            "Deseja solicitar o retorno à posição Home?\n\n"
-            "Nesta versão, a ação atualiza somente a demonstração; "
-            "nenhum comando é enviado aos robôs físicos.",
+            "Deseja solicitar o retorno à posição Home?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if resposta == QMessageBox.Yes:
             self.home_solicitado.emit()
-            self.move_simulated_home()
 
-    def start(self):
-        if self.telemetry_source is not None:
-            self.operation_info.setText(
-                "RTDE conectado somente para leitura. Este botão não movimenta o robô."
-            )
-            return
-        self.running = True
-        self.paused = False
-        self.set_state("Simulação em andamento")
-        self.add_log("Simulação iniciada")
-
-    def start_demo(self):
-        """Inicia a animação simulada sem tentar abrir comunicação com robôs."""
-        if self.telemetry_source is not None:
-            self.disconnect_telemetry("Demonstração ativa • sem conexão com robôs")
-        self.t = 0.0
-        self.running = True
-        self.paused = False
-        self.gripper_position = 255
-        self.update_simulation()
-        self.set_state("Demonstração em andamento")
-        self.telemetry_status.setText("Demonstração ativa • dados simulados • sem robôs")
-        for source_label in self.source_labels:
-            source_label.setText("Demonstração • dados simulados")
-        for status_label in self.status_labels:
-            status_label.setText("Movimento: simulado")
-        self.add_log("Modo demonstração iniciado; nenhum robô foi conectado")
-
-    def pause(self):
-        if self.telemetry_source is not None:
-            self.operation_info.setText(
-                "Pausar simulação não interrompe as leituras RTDE nem envia comandos ao robô."
-            )
-            return
-        if not self.running:
-            return
-        self.paused = not self.paused
-        state = "Simulação pausada" if self.paused else "Simulação em andamento"
-        self.set_state(state)
-        self.add_log("Simulação pausada" if self.paused else "Simulação retomada")
-
-    def move_simulated_home(self):
-        """Retorna a postura da demonstração à pose inicial definida na UI."""
-        if self.telemetry_source is not None:
-            self.operation_info.setText(
-                "A conexão atual é somente de leitura. Home físico ainda não está integrado."
-            )
-            self.add_log("Home solicitado, mas não enviado: conexão RTDE é somente leitura")
-            return
-
-        self.running = False
-        self.paused = False
-        self.t = 0.0
-        home_angles = [0.0, -90.0, 0.0, -90.0, 0.0, 0.0]
-        for name in ("UR3e", "UR5e"):
-            self.joint_angles[name] = list(home_angles)
-        self.positions["UR3e"] = [180.0, -120.0, 250.0, 0.0, 3.142, 0.0]
-        self.positions["UR5e"] = [350.0, -180.0, 400.0, 0.0, 3.142, 0.0]
-        self.wrenches = {
-            "UR3e": [0.0] * 6,
-            "UR5e": [0.0] * 6,
-        }
-        self.set_state("Pose Home simulada")
-        self.refresh_values()
-        self.refresh_monitor()
-        self.refresh_robot_views()
-        self.add_log("Demonstração retornou à pose Home")
-
-    def set_state(self, state):
-        self.operation_info.setText(f"{state}. Nenhum robô real é controlado.")
-        self.summary.setText(state)
-        for item in self.status_labels:
-            item.setText("Movimento: simulado" if self.running and not self.paused else "Movimento: parado")
-
-    def add_log(self, text):
+    def add_log(self, text, nivel="info"):
         self.log_entries.append(text)
         self.log_entries = self.log_entries[-100:]
+        log_view = getattr(self, "log_view", None)
+        if log_view is not None:
+            marca = {"aviso": "AVISO  ", "erro": "ERRO   "}.get(nivel, "")
+            log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {marca}{text}")
 
     def tick(self):
         if self.telemetry_source is not None:
@@ -808,8 +814,6 @@ class AegisApp(QWidget):
                 self.disconnect_telemetry(
                     f"Falha na leitura RTDE: {str(error)[:70]}"
                 )
-        elif self.running and not self.paused:
-            self.update_simulation()
         self.refresh_values()
         self.refresh_monitor()
         self.refresh_robot_views()
@@ -826,7 +830,6 @@ class AegisApp(QWidget):
             self.telemetry_status.setText("Informe os dois endereços IP")
             return
 
-        self.connect_button.setEnabled(False)
         self.telemetry_status.setText("Conectando para leitura...")
         QApplication.processEvents()
         source = None
@@ -840,8 +843,8 @@ class AegisApp(QWidget):
             source.connect()
             source.read()  # valida a leitura inicial antes de mudar o estado da UI
             self.set_telemetry_source(source)
-            self.disconnect_button.setEnabled(True)
             self.telemetry_status.setText("Conectado • telemetria real, somente leitura")
+            self._set_level(self.telemetry_status, "info")
             for source_label in self.source_labels:
                 source_label.setText("RTDE • leitura real, somente leitura")
             for status_label in self.status_labels:
@@ -850,36 +853,21 @@ class AegisApp(QWidget):
         except Exception as error:
             if source is not None:
                 source.close()
-            self.connect_button.setEnabled(True)
             self.telemetry_status.setText(f"Não conectou: {str(error)[:75]}")
+            self._set_level(self.telemetry_status, "erro")
             self.add_log("Falha ao conectar telemetria RTDE")
 
-    def disconnect_telemetry(self, status="Desconectado • exibindo dados simulados"):
+    def disconnect_telemetry(self, status="Desconectado • pressione Iniciar"):
+        """Fecha a leitura (usado quando a leitura RTDE falha)."""
         source, self.telemetry_source = self.telemetry_source, None
         if source is not None:
             source.close()
-        if hasattr(self, "connect_button"):
-            self.connect_button.setEnabled(True)
-            self.disconnect_button.setEnabled(False)
-            self.telemetry_status.setText(status)
-            for source_label in self.source_labels:
-                source_label.setText("Dados simulados • modo demonstração")
-            for status_label in self.status_labels:
-                status_label.setText("Movimento: parado")
+        self.telemetry_status.setText(status)
+        for source_label in self.source_labels:
+            source_label.setText("Sem leitura • pressione Iniciar")
+        for status_label in self.status_labels:
+            status_label.setText("Movimento: parado")
         self.add_log("Telemetria RTDE desconectada")
-
-    def update_simulation(self):
-        self.t += 0.1
-        dx = 35 * math.sin(self.t * 0.7)
-        dy = 25 * math.cos(self.t * 0.5)
-        dz = 18 * math.sin(self.t * 0.4)
-        self.positions["UR3e"][:3] = [180 + dx, -120 + dy, 250 + dz]
-        self.positions["UR5e"][:3] = [
-            350 + self.scale * dx,
-            -180 + self.scale * dy,
-            400 + self.scale * dz,
-        ]
-        self.update_simulated_feedback()
 
     def update_from_telemetry(self):
         """Atualiza a interface com uma fonte RTDE somente de leitura."""
@@ -901,34 +889,6 @@ class AegisApp(QWidget):
         for camera_panel in getattr(self, "camera_panels", []):
             camera_panel.stop_camera()
         super().closeEvent(event)
-
-    def update_simulated_feedback(self):
-        t = self.t
-        self.joint_angles["UR3e"] = [
-            12 * math.sin(t * 0.35),
-            -90 + 8 * math.sin(t * 0.55),
-            10 * math.cos(t * 0.45),
-            -90 + 5 * math.sin(t * 0.30),
-            4 * math.cos(t * 0.40),
-            8 * math.sin(t * 0.25),
-        ]
-        self.joint_angles["UR5e"] = [
-            8 * math.sin(t * 0.32),
-            -90 + 6 * math.sin(t * 0.50),
-            8 * math.cos(t * 0.42),
-            -90 + 4 * math.sin(t * 0.28),
-            3 * math.cos(t * 0.36),
-            6 * math.sin(t * 0.22),
-        ]
-        for robot, factor in (("UR3e", 1.0), ("UR5e", 0.7)):
-            self.wrenches[robot] = [
-                factor * 3.0 * math.sin(t * 0.7),
-                factor * 2.0 * math.cos(t * 0.5),
-                factor * 4.0 * math.sin(t * 0.4),
-                factor * 0.25 * math.sin(t * 0.6),
-                factor * 0.20 * math.cos(t * 0.45),
-                factor * 0.30 * math.sin(t * 0.35),
-            ]
 
     def refresh_values(self):
         for name, position in self.positions.items():
@@ -980,8 +940,6 @@ class AegisApp(QWidget):
                 self.camera_row.setDirection(direction)
             if hasattr(self, "operation_controls"):
                 self.operation_controls.setDirection(direction)
-            if hasattr(self, "scale_controls"):
-                self.scale_controls.setDirection(direction)
             self.sidebar.setFixedWidth(170 if narrow else 222)
 
 

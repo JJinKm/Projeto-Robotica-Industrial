@@ -35,6 +35,9 @@ class CameraPanel(QFrame):
         controls = QHBoxLayout()
         self.device_combo = QComboBox()
         self.device_combo.setMinimumWidth(150)
+        # Nomes longos de câmera não podem alargar a tela inteira.
+        self.device_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.device_combo.setMinimumContentsLength(12)
         self.start_button = QPushButton("Abrir câmera")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_camera)

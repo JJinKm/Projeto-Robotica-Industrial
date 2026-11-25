@@ -259,8 +259,9 @@ class RobotArmView(QWidget):
             if self.robot_name == "UR5e":
                 self._add_demo_gripper()
 
-            distance = 0.72 if self.robot_name == "UR3e" else 1.12
-            target_height = 0.22 if self.robot_name == "UR3e" else 0.34
+            # Câmera afastada o suficiente para o robô inteiro caber na vista.
+            distance = 2.0 if self.robot_name == "UR3e" else 3.2
+            target_height = 0.36 if self.robot_name == "UR3e" else 0.56
             self.view.opts["center"] = QVector3D(0.0, 0.0, target_height)
             self.view.setCameraPosition(distance=distance, elevation=27, azimuth=42)
             self.model_loaded = True

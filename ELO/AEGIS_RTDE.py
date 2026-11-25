@@ -10,6 +10,7 @@ tudo, inclusive um Home em andamento.
 from __future__ import annotations
 
 import queue
+import socket
 import sys
 import threading
 import time
@@ -19,29 +20,25 @@ from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 try:  # Permite executar como arquivo ou importar como pacote.
+    from . import aegis_config
     from .Projeto_Robotica import AegisApp
+    from .rtde_telemetry import RobotTelemetry
 except ImportError:
+    import aegis_config
     from Projeto_Robotica import AegisApp
+    from rtde_telemetry import RobotTelemetry
 
 
 # --- Configuração do controle (valores do ur_rtde.py) ----------------------
 # "forca": leader em force mode nativo do UR (sensor F/T do UR3e) com reflexão
 #          da força estimada no follower; "teach": freedrive simples.
 MODO_GUIA = "forca"
-AMORTECIMENTO = 0.015  # 0..1  maior = para mais rápido ao soltar
-GANHO_FORCA = 2.0      # 0..2  maior = responde mais rápido ao empurrão
 VMAX_LIN = 0.25        # m/s
 VMAX_ROT = 0.8         # rad/s
-
-# Troca teach/force no leader pela força lida no sensor dele.
-F_ENTRA_FORCE = 1.1    # N  acima disso o leader vai p/ force mode
-F_SAI_FORCE = 0.5      # N  (não usado na lógica atual do ur_rtde.py)
+# Amortecimento, ganho, força para guiar e a reflexão de força são ajustados
+# na tela Configurações (aegis_config.py) e chegam ao worker em self.cfg.
 
 # Reflexão de força follower -> leader (estimativa do CB3, ruído 15-40 N).
-REFLEXAO = True
-K_REFLEXAO = 0.1            # N no leader por N no follower
-ZONA_MORTA_REFLEXAO = 30.0  # N
-FMAX_REFLEXAO = 10.0        # N
 ALFA_REFLEXAO = 0.1         # filtro (menor = mais suave)
 T_CALIBRACAO = 1.5          # s
 
@@ -53,6 +50,15 @@ POS_ABERTA_GARRA = 100
 JOINT_HOME = [-1.57, -1.57, -1.57, -1.57, 1.57, 0.0]
 VEL_HOME = 1.5    # rad/s
 ACEL_HOME = 0.5   # rad/s²
+
+
+def _robo_responde(ip: str, timeout: float = 2.0) -> bool:
+    """Testa a porta RTDE (30004) sem bloquear a interface."""
+    try:
+        with socket.create_connection((ip, 30004), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 class _ParadaSolicitada(Exception):
@@ -69,9 +75,13 @@ class _JoshuaRTDEWorker(QThread):
     status_changed = Signal(str, str)   # mensagem, nível (info|aviso|erro)
     state_changed = Signal(str)
     info_changed = Signal(dict)         # indicadores: leader, força, reflexão, garra
+    telemetry_changed = Signal(dict)    # {"UR3e": (q, pose, wrench), "UR5e": (...)}
 
-    def __init__(self, master_ip: str, follower_ip: str):
+    def __init__(self, master_ip: str, follower_ip: str, cfg: dict | None = None):
         super().__init__()
+        self.cfg = dict(cfg) if cfg is not None else aegis_config.carregar()
+        self._mr = self._fr = None
+        self._proxima_telemetria = 0.0
         self.master_ip = master_ip
         self.follower_ip = follower_ip
         self.estado = "conectando"
@@ -111,6 +121,25 @@ class _JoshuaRTDEWorker(QThread):
         if mudou:
             self.info_changed.emit(dict(self._info))
 
+    def _emitir_telemetria(self):
+        """Envia juntas, TCP e forças dos dois robôs à tela (10 Hz).
+
+        Usa as mesmas conexões RTDE do controle: a tela não abre conexões
+        próprias nem trava esperando um robô responder.
+        """
+        agora = time.monotonic()
+        if self._mr is None or agora < self._proxima_telemetria:
+            return
+        self._proxima_telemetria = agora + 0.1
+        try:
+            amostras = {
+                nome: (tuple(r.getActualQ()), tuple(r.getActualTCPPose()), tuple(r.getActualTCPForce()))
+                for nome, r in (("UR3e", self._mr), ("UR5e", self._fr))
+            }
+        except Exception:
+            return
+        self.telemetry_changed.emit(amostras)
+
     @staticmethod
     def _try_call(obj, method_name, *args):
         if obj is None:
@@ -128,6 +157,7 @@ class _JoshuaRTDEWorker(QThread):
         ctrl.moveJ(JOINT_HOME, VEL_HOME, ACEL_HOME, True)
         time.sleep(0.1)
         while ctrl.getAsyncOperationProgressEx().isAsyncOperationRunning():
+            self._emitir_telemetria()
             if self._stop_requested.is_set():
                 ctrl.stopJ(2.0)
                 raise _ParadaSolicitada()
@@ -149,7 +179,8 @@ class _JoshuaRTDEWorker(QThread):
         f = [a - b for a, b in zip(fr.getActualTCPForce()[:3], vies)]
         f_filt = [(1 - ALFA_REFLEXAO) * a + ALFA_REFLEXAO * b for a, b in zip(f_filt, f)]
         norma = math.sqrt(sum(x * x for x in f_filt))
-        mag = min(K_REFLEXAO * max(norma - ZONA_MORTA_REFLEXAO, 0.0), FMAX_REFLEXAO)
+        c = self.cfg
+        mag = min(c["k_reflexao"] * max(norma - c["zona_morta_reflexao"], 0.0), c["fmax_reflexao"])
         w = [mag * x / norma for x in f_filt] if mag > 0 else [0.0, 0.0, 0.0]
         return w, f_filt, norma, mag
 
@@ -159,7 +190,8 @@ class _JoshuaRTDEWorker(QThread):
                 from garra_robotiq import Garra
             except ImportError:
                 from .garra_robotiq import Garra
-            garra = Garra()
+            porta = self.cfg["porta_garra"]
+            garra = Garra(None if porta == "auto" else porta)
         except Exception as error:
             self._status(f"Garra indisponível ({error}). Seguindo sem garra.", "aviso")
             self._info_set(garra="indisponível")
@@ -168,7 +200,11 @@ class _JoshuaRTDEWorker(QThread):
             f"Conectando à garra na {garra.porta} (aguarde ~10 s, o USB da câmera reinicia)..."
         )
         try:
-            garra.conectar(cancelar=self._stop_requested.is_set)
+            def cancelar():
+                self._emitir_telemetria()  # mantém a tela atualizada durante a espera
+                return self._stop_requested.is_set()
+
+            garra.conectar(cancelar=cancelar)
             garra.ativar()
             garra.mover(POS_ABERTA_GARRA)
             garra.fechada = False
@@ -208,12 +244,25 @@ class _JoshuaRTDEWorker(QThread):
 
             self._estado("conectando")
             self._status("Conectando aos controladores RTDE...")
+            # O construtor do ur_rtde segura o Python inteiro (inclusive a
+            # tela) até o timeout se o robô não responde. Testa antes com um
+            # socket comum, que não trava a interface.
+            for nome, ip in (("UR3e (leader)", self.master_ip), ("UR5 (follower)", self.follower_ip)):
+                if not _robo_responde(ip):
+                    raise RuntimeError(
+                        f"O {nome} não responde em {ip}. Confira se ele está ligado, "
+                        "com o PolyScope aberto, e se o cabo de rede está conectado."
+                    )
+                if self._stop_requested.is_set():
+                    raise _ParadaSolicitada()
             master_control = RTDEControl(self.master_ip)
             master_receive = RTDEReceive(self.master_ip)
             follower_control = RTDEControl(self.follower_ip)
             follower_receive = RTDEReceive(self.follower_ip)
+            self._mr, self._fr = master_receive, follower_receive
+            self._emitir_telemetria()
             self._status("RTDE conectado aos dois robôs.")
-            self._info_set(leader="travado", reflexao="desligada" if not REFLEXAO else "inativa")
+            self._info_set(leader="travado", reflexao="inativa" if self.cfg["reflexao"] else "desligada")
 
             if self._stop_requested.is_set():
                 raise _ParadaSolicitada()
@@ -243,6 +292,7 @@ class _JoshuaRTDEWorker(QThread):
                 t_calib = None
 
             while not self._stop_requested.is_set():
+                self._emitir_telemetria()
                 # Processa Home na mesma thread que controla os robôs.
                 try:
                     command = self._commands.get_nowait()
@@ -263,8 +313,8 @@ class _JoshuaRTDEWorker(QThread):
                         time.sleep(0.5)
                         master_control.zeroFtSensor()
                         time.sleep(0.2)
-                        master_control.forceModeSetDamping(AMORTECIMENTO)
-                        master_control.forceModeSetGainScaling(GANHO_FORCA)
+                        master_control.forceModeSetDamping(self.cfg["amortecimento"])
+                        master_control.forceModeSetGainScaling(self.cfg["ganho_forca"])
                         reiniciar_calibracao()
                     else:
                         master_control.teachMode()
@@ -316,7 +366,7 @@ class _JoshuaRTDEWorker(QThread):
                 joint_master = master_receive.getActualQ()
 
                 if MODO_GUIA == "forca":
-                    if REFLEXAO and vies_follower is None:
+                    if self.cfg["reflexao"] and vies_follower is None:
                         # Mede o viés da estimativa de força com o follower servoando.
                         if t_calib is None:
                             t_calib = time.monotonic()
@@ -337,7 +387,7 @@ class _JoshuaRTDEWorker(QThread):
                         self._passo_forca(master_control)
                         force_mode = True
                         self._info_set(leader="força")
-                    elif REFLEXAO:
+                    elif self.cfg["reflexao"]:
                         w_ref, f_filt, f_mag, mag_ref = self._forca_reflexao(
                             follower_receive, f_filt, vies_follower
                         )
@@ -345,7 +395,7 @@ class _JoshuaRTDEWorker(QThread):
                             sum(x * x for x in master_receive.getActualTCPForce()[:3])
                         )
                         # Mão no leader -> force mode; senão teach mode, que não deriva parado.
-                        if f_lider > F_ENTRA_FORCE:
+                        if f_lider > self.cfg["f_entra_force"]:
                             if teach_mode:
                                 master_control.endTeachMode()
                                 teach_mode = False
@@ -399,6 +449,7 @@ class _JoshuaRTDEWorker(QThread):
             if teach_mode:
                 self._try_call(master_control, "endTeachMode")
             self._tracking_ready.clear()
+            self._mr = self._fr = None
             self._try_call(follower_control, "stopScript")
             self._try_call(master_control, "stopScript")
             self._try_call(master_receive, "disconnect")
@@ -416,11 +467,13 @@ class JoshuaController(QObject):
     status_changed = Signal(str, str)
     state_changed = Signal(str)
     info_changed = Signal(dict)
+    telemetry_changed = Signal(dict)
 
     def __init__(self, master_ip: str, follower_ip: str):
         super().__init__()
         self.master_ip = master_ip
         self.follower_ip = follower_ip
+        self.cfg: dict | None = None
         self.worker: _JoshuaRTDEWorker | None = None
 
     def ativo(self) -> bool:
@@ -429,10 +482,11 @@ class JoshuaController(QObject):
     def iniciar(self):
         if self.ativo():
             return
-        self.worker = _JoshuaRTDEWorker(self.master_ip, self.follower_ip)
+        self.worker = _JoshuaRTDEWorker(self.master_ip, self.follower_ip, self.cfg)
         self.worker.status_changed.connect(self.status_changed)
         self.worker.state_changed.connect(self.state_changed)
         self.worker.info_changed.connect(self.info_changed)
+        self.worker.telemetry_changed.connect(self.telemetry_changed)
         self.worker.finished.connect(self._ao_terminar)
         self.state_changed.emit("conectando")
         self.worker.start()
@@ -463,6 +517,24 @@ class JoshuaController(QObject):
             self.worker.wait()
 
 
+class _TelemetriaDoControle:
+    """Fonte de telemetria da tela alimentada pelo worker de controle."""
+
+    def __init__(self):
+        self.amostras = {}
+
+    def atualizar(self, amostras):
+        self.amostras = {
+            nome: RobotTelemetry(q, pose, wrench) for nome, (q, pose, wrench) in amostras.items()
+        }
+
+    def read(self):
+        return self.amostras
+
+    def close(self):
+        pass
+
+
 class AegisRTDEApp(AegisApp):
     """AEGIS com botões físicos conectados ao controlador do Joshua."""
 
@@ -482,6 +554,9 @@ class AegisRTDEApp(AegisApp):
         self.controlador.status_changed.connect(self._mostrar_status_rtde)
         self.controlador.state_changed.connect(self.apply_operation_state)
         self.controlador.info_changed.connect(self.set_indicators)
+        self.controlador.telemetry_changed.connect(self._receber_telemetria)
+        self.controlador.state_changed.connect(self._ao_mudar_estado)
+        self._telemetria = _TelemetriaDoControle()
 
         self.iniciar_solicitado.connect(self.controlador.iniciar)
         self.pausar_retomar_solicitado.connect(self.controlador.alternar_pausa)
@@ -496,9 +571,38 @@ class AegisRTDEApp(AegisApp):
     def _solicitar_inicio(self):
         self.controlador.master_ip = self.ur3e_ip.text().strip()
         self.controlador.follower_ip = self.ur5e_ip.text().strip()
+        # Usa os parâmetros salvos; os IPs digitados também ficam salvos.
+        cfg = dict(self.config)
+        cfg["ip_leader"] = self.controlador.master_ip
+        cfg["ip_follower"] = self.controlador.follower_ip
+        if (cfg["ip_leader"], cfg["ip_follower"]) != (self.config["ip_leader"], self.config["ip_follower"]):
+            try:
+                self.config = aegis_config.salvar(cfg)
+            except OSError:
+                pass
+        self.controlador.cfg = cfg
+        self.add_log(
+            "Parâmetros: amortecimento {amortecimento:.3f}, ganho {ganho_forca:.2f}, "
+            "guiar acima de {f_entra_force:.1f} N, reflexão {r} (ganho {k_reflexao:.2f}, "
+            "zona morta {zona_morta_reflexao:.0f} N, máx {fmax_reflexao:.1f} N), garra {porta_garra}.".format(
+                r="ligada" if cfg["reflexao"] else "desligada", **cfg)
+        )
+        self.telemetry_status.setText("Conectando aos robôs...")
         self.iniciar_solicitado.emit()
-        # Também conecta a telemetria (juntas, TCP e forças na tela).
-        self.connect_telemetry()
+
+    def _receber_telemetria(self, amostras):
+        """A telemetria vem do worker de controle (sem conexões extras)."""
+        self._telemetria.atualizar(amostras)
+        if self.telemetry_source is not self._telemetria:
+            self.set_telemetry_source(self._telemetria)
+            self.telemetry_status.setText("Conectado • telemetria real, somente leitura")
+            self._set_level(self.telemetry_status, "info")
+            for source_label in self.source_labels:
+                source_label.setText("RTDE • leitura real")
+
+    def _ao_mudar_estado(self, estado):
+        if estado in ("desconectado", "erro"):
+            self.disconnect_telemetry("Sem leitura • pressione Iniciar")
 
     def _confirmar_home(self):
         resposta = QMessageBox.warning(

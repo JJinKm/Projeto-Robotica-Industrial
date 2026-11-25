@@ -7,6 +7,10 @@ from PySide6.QtCore import Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -24,10 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from . import aegis_config
     from .robot_view import RobotArmView
     from .camera_panel import CameraPanel
     from .focus_overlay import CameraFocusOverlay
 except ImportError:
+    import aegis_config
     from robot_view import RobotArmView
     from camera_panel import CameraPanel
     from focus_overlay import CameraFocusOverlay
@@ -92,10 +98,20 @@ QLabel#stateChip[nivel="aviso"] { background:#33270C; color:#FFCF66; border-colo
 QLabel#stateChip[nivel="erro"] { background:#D9534A; color:#FFFFFF; border-color:#D9534A; }
 QPlainTextEdit#eventLog { background:#07170F; color:#CFE0D2; border:1px solid #244B33; border-radius:10px; padding:8px; font-family:Consolas; font-size:12px; }
 QLineEdit:disabled { color:#7E9585; border-color:#1B3524; }
+QDoubleSpinBox { background:#07170F; color:#EDF5ED; border:1px solid #31553A; border-radius:8px; padding:7px 8px; min-width:110px; selection-background-color:#4C8C2E; }
+QDoubleSpinBox:disabled, QComboBox:disabled, QCheckBox:disabled { color:#7E9585; border-color:#1B3524; }
+QCheckBox { spacing:8px; }
+QCheckBox::indicator { width:18px; height:18px; border:1px solid #47763B; border-radius:5px; background:#07170F; }
+QCheckBox::indicator:checked { background:#91EA32; border-color:#91EA32; }
 QPushButton#selected { background:#28562B; color:#C0FF67; border:1px solid #5E9E36; }
 QLineEdit, QComboBox { background:#07170F; color:#EDF5ED; border:1px solid #31553A; border-radius:8px; padding:9px 10px; selection-background-color:#4C8C2E; }
 QComboBox QAbstractItemView { background:#0A2117; color:#EDF5ED; selection-background-color:#28562B; border:1px solid #31553A; }
 """
+
+
+def nome_exibido(robo):
+    """Nome mostrado na tela. A chave interna "UR5e" é o follower, que é um UR5 (CB3)."""
+    return {"UR5e": "UR5"}.get(robo, robo)
 
 
 def label(text, name=None):
@@ -143,6 +159,8 @@ class AegisApp(QWidget):
             "UR3e": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "UR5e": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         }
+        # Parâmetros salvos neste computador (tela Configurações).
+        self.config = aegis_config.carregar()
         # Leitor RTDE; conectado pelo botão Iniciar.
         self.telemetry_source = None
         self.values = {}
@@ -295,15 +313,15 @@ class AegisApp(QWidget):
         layout.addLayout(tiles)
 
         footer = QHBoxLayout()
-        footer.addWidget(label("AEGIS  ·  UR3e Leader  →  UR5e Follower", "muted"), 1)
+        footer.addWidget(label("AEGIS  ·  UR3e Leader  →  UR5 Follower", "muted"), 1)
         layout.addLayout(footer)
         layout.addStretch()
 
     def robot_card(self, name, role):
         widget, layout = card()
-        layout.addWidget(label(name, "robotName"))
+        layout.addWidget(label(nome_exibido(name), "robotName"))
         layout.addWidget(label(role, "muted"))
-        motion = label("Movimento: parado")
+        motion = label("Operação: desconectado")
         layout.addWidget(motion)
         self.status_labels.append(motion)
         layout.addSpacing(8)
@@ -337,7 +355,7 @@ class AegisApp(QWidget):
         self.summary = label("Operação parada", "statusValue")
         self.summary.setObjectName("statusValue")
         status_text.addWidget(self.summary)
-        status_text.addWidget(label("UR3e Leader  →  UR5e Follower", "muted"))
+        status_text.addWidget(label("UR3e Leader  →  UR5 Follower", "muted"))
         status_row.addLayout(status_text, 1)
 
         operation_button = QPushButton("Abrir Operação")
@@ -474,6 +492,15 @@ class AegisApp(QWidget):
         # IPs só podem mudar com os robôs desconectados.
         self.ur3e_ip.setEnabled(desligado)
         self.ur5e_ip.setEnabled(desligado)
+        # Parâmetros também só mudam com os robôs desconectados.
+        for nome in ("settings_panel", "botao_salvar_config", "botao_padroes_config"):
+            widget = getattr(self, nome, None)
+            if widget is not None:
+                widget.setEnabled(desligado)
+        if hasattr(self, "settings_status"):
+            self.settings_status.setText(
+                "" if desligado else "Pressione Parar para alterar os parâmetros."
+            )
         if desligado:
             self.set_indicators({})  # sem controle ativo, nada a indicar
         self.summary.setText(texto)
@@ -520,21 +547,17 @@ class AegisApp(QWidget):
         connection_card, connection_layout = card()
         connection_layout.addWidget(label("Fonte das leituras", "sectionTitle"))
         connection_layout.addWidget(label(
-            "O botão Iniciar também conecta a leitura das medidas dos robôs (somente leitura).",
-            "muted",
-        ))
-        connection_layout.addWidget(label(
-            "Os IPs iniciais vêm do ur_rtde.py do projeto; confirme com Isma antes de conectar.",
+            "As medidas aparecem ao pressionar Iniciar. Os IPs só podem ser alterados com os robôs desconectados.",
             "muted",
         ))
         address_row = QHBoxLayout()
-        self.ur3e_ip = QLineEdit("10.104.11.99")
+        self.ur3e_ip = QLineEdit(self.config["ip_leader"])
         self.ur3e_ip.setPlaceholderText("IP do UR3e Leader")
-        self.ur5e_ip = QLineEdit("10.104.11.71")
-        self.ur5e_ip.setPlaceholderText("IP do UR5e Follower")
+        self.ur5e_ip = QLineEdit(self.config["ip_follower"])
+        self.ur5e_ip.setPlaceholderText("IP do UR5 Follower")
         address_row.addWidget(label("UR3e Leader"))
         address_row.addWidget(self.ur3e_ip, 1)
-        address_row.addWidget(label("UR5e Follower"))
+        address_row.addWidget(label("UR5 Follower"))
         address_row.addWidget(self.ur5e_ip, 1)
         connection_layout.addLayout(address_row)
 
@@ -568,7 +591,7 @@ class AegisApp(QWidget):
         self.view_splitter = QSplitter(Qt.Vertical)
         self.view_splitter.setChildrenCollapsible(False)
         self.visualization_card, visualization_layout = card()
-        visualization_layout.addWidget(label("Modelos UR3e e UR5e", "sectionTitle"))
+        visualization_layout.addWidget(label("Modelos UR3e e UR5", "sectionTitle"))
         self.visual_row = QHBoxLayout()
         self.visual_row.setSpacing(14)
         for robot_name, role in (("UR3e", "LEADER"), ("UR5e", "FOLLOWER")):
@@ -577,7 +600,7 @@ class AegisApp(QWidget):
             panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(10, 9, 10, 8)
             panel_layout.setSpacing(4)
-            panel_layout.addWidget(label(f"{robot_name}  ·  {role}", "sectionTitle"))
+            panel_layout.addWidget(label(f"{nome_exibido(robot_name)}  ·  {role}", "sectionTitle"))
             view = RobotArmView(robot_name)
             self.robot_views[robot_name] = view
             self.robot_panels[robot_name] = panel
@@ -649,7 +672,7 @@ class AegisApp(QWidget):
             mini_view = RobotArmView(robot_name, parent=panel, compact=True)
             self.focus_robot_views[robot_name] = mini_view
             panel_layout.addWidget(mini_view)
-            robot_tabs.addTab(panel, robot_name)
+            robot_tabs.addTab(panel, nome_exibido(robot_name))
         self._focus_robot_tabs = robot_tabs
 
         self.showFullScreen()
@@ -737,7 +760,7 @@ class AegisApp(QWidget):
     def monitor_robot_card(self, name, role):
         widget, layout = card()
         header = QHBoxLayout()
-        header.addWidget(label(name, "robotName"), 1)
+        header.addWidget(label(nome_exibido(name), "robotName"), 1)
         header.addWidget(label(role, "roleBadge"))
         layout.addLayout(header)
         source_label = label("Sem leitura • pressione Iniciar", "muted")
@@ -763,13 +786,137 @@ class AegisApp(QWidget):
         return widget
 
     def make_settings(self):
-        layout = self.page("Configurações", "Informações gerais do protótipo")
-        widget, box = card()
-        box.addWidget(label("Conexão dos robôs", "robotName"))
-        box.addWidget(label("As leituras RTDE são configuradas na tela Operação."))
-        box.addWidget(label("O botão Iniciar conecta o controle dos robôs e a leitura RTDE.", "muted"))
-        layout.addWidget(widget)
+        layout = self.page(
+            "Configurações",
+            "Parâmetros do controle. Valem a partir do próximo Iniciar e ficam salvos neste computador.",
+        )
+        self.settings_widgets = {}
+        self.settings_panel = QWidget()
+        panel_layout = QVBoxLayout(self.settings_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(18)
+
+        def numero(chave, sufixo, casas, passo, ajuda):
+            lo, hi = aegis_config.LIMITES[chave]
+            campo = QDoubleSpinBox()
+            campo.setRange(lo, hi)
+            campo.setDecimals(casas)
+            campo.setSingleStep(passo)
+            if sufixo:
+                campo.setSuffix(f" {sufixo}")
+            campo.setToolTip(ajuda)
+            self.settings_widgets[chave] = campo
+            return campo
+
+        def secao(titulo, descricao, linhas):
+            widget, box = card()
+            box.addWidget(label(titulo, "robotName"))
+            box.addWidget(label(descricao, "muted"))
+            form = QFormLayout()
+            form.setHorizontalSpacing(18)
+            form.setVerticalSpacing(10)
+            form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            for texto, campo, ajuda in linhas:
+                linha = QHBoxLayout()
+                linha.setSpacing(16)
+                # Largura fixa: campos alinhados em todas as seções.
+                campo.setFixedWidth(260 if isinstance(campo, QComboBox) else 150)
+                linha.addWidget(campo)
+                linha.addWidget(label(ajuda, "muted"), 1)
+                nome = QLabel(texto)
+                nome.setFixedWidth(130)
+                form.addRow(nome, linha)
+            box.addLayout(form)
+            panel_layout.addWidget(widget)
+
+        self.porta_garra = QComboBox()
+        self.porta_garra.addItem("Automática (câmera do punho)", "auto")
+        for porta in aegis_config.portas_seriais():
+            self.porta_garra.addItem(porta, porta)
+        self.settings_widgets["porta_garra"] = self.porta_garra
+        secao("Garra", "Porta serial da garra Robotiq (passa pela câmera do punho).", [
+            ("Porta", self.porta_garra, "Use Automática, a menos que a garra não seja encontrada."),
+        ])
+
+        secao("Leader", "Como o UR3e responde à mão do operador.", [
+            ("Amortecimento", numero("amortecimento", "", 3, 0.005, ""),
+             "Maior: para mais rápido ao soltar. Menor: desliza mais."),
+            ("Ganho de força", numero("ganho_forca", "", 2, 0.1, ""),
+             "Maior: responde mais rápido ao empurrão (acima de 1 pode oscilar)."),
+            ("Força para guiar", numero("f_entra_force", "N", 1, 0.1, ""),
+             "Acima disso o leader sai do teach mode e passa a seguir a mão."),
+        ])
+
+        self.reflexao_ativa = QCheckBox("Ativada")
+        self.settings_widgets["reflexao"] = self.reflexao_ativa
+        secao("Reflexão de força", "Contato no follower (UR5) sentido na mão, no leader.", [
+            ("Reflexão", self.reflexao_ativa, ""),
+            ("Ganho", numero("k_reflexao", "", 2, 0.01, ""),
+             "N aplicados no leader para cada N estimado no follower."),
+            ("Zona morta", numero("zona_morta_reflexao", "N", 0, 5, ""),
+             "Forças menores são ruído da estimativa do UR5 e são ignoradas."),
+            ("Força máxima", numero("fmax_reflexao", "N", 1, 0.5, ""),
+             "Limite da força aplicada no leader."),
+        ])
+        layout.addWidget(self.settings_panel)
+
+        actions = QHBoxLayout()
+        self.botao_salvar_config = QPushButton("Salvar")
+        self.botao_salvar_config.setObjectName("primary")
+        self.botao_salvar_config.clicked.connect(self.salvar_configuracoes)
+        self.botao_padroes_config = QPushButton("Restaurar padrões")
+        self.botao_padroes_config.clicked.connect(self.restaurar_configuracoes)
+        actions.addWidget(self.botao_salvar_config)
+        actions.addWidget(self.botao_padroes_config)
+        self.settings_status = label("", "muted")
+        actions.addWidget(self.settings_status, 1)
+        layout.addLayout(actions)
         layout.addStretch()
+        self._mostrar_configuracoes(self.config)
+
+    def _mostrar_configuracoes(self, cfg):
+        for chave, campo in self.settings_widgets.items():
+            valor = cfg[chave]
+            if isinstance(campo, QDoubleSpinBox):
+                campo.setValue(valor)
+            elif isinstance(campo, QCheckBox):
+                campo.setChecked(bool(valor))
+            elif isinstance(campo, QComboBox):
+                indice = campo.findData(valor)
+                if indice < 0:  # porta salva que não está conectada agora
+                    campo.addItem(f"{valor} (não encontrada)", valor)
+                    indice = campo.count() - 1
+                campo.setCurrentIndex(indice)
+
+    def _ler_configuracoes(self):
+        cfg = dict(self.config)
+        for chave, campo in self.settings_widgets.items():
+            if isinstance(campo, QDoubleSpinBox):
+                cfg[chave] = campo.value()
+            elif isinstance(campo, QCheckBox):
+                cfg[chave] = campo.isChecked()
+            elif isinstance(campo, QComboBox):
+                cfg[chave] = campo.currentData()
+        cfg["ip_leader"] = self.ur3e_ip.text().strip()
+        cfg["ip_follower"] = self.ur5e_ip.text().strip()
+        return cfg
+
+    def salvar_configuracoes(self):
+        try:
+            self.config = aegis_config.salvar(self._ler_configuracoes())
+        except OSError as error:
+            self.settings_status.setText(f"Não foi possível salvar: {error}")
+            return
+        self._mostrar_configuracoes(self.config)
+        self.settings_status.setText(f"Salvo às {time.strftime('%H:%M:%S')}. Vale a partir do próximo Iniciar.")
+        self.add_log("Configurações salvas.")
+
+    def restaurar_configuracoes(self):
+        padroes = dict(aegis_config.PADROES)
+        padroes["ip_leader"] = self.ur3e_ip.text().strip()
+        padroes["ip_follower"] = self.ur5e_ip.text().strip()
+        self._mostrar_configuracoes(padroes)
+        self.settings_status.setText("Valores padrão carregados. Pressione Salvar para manter.")
 
     def show_page(self, index):
         self.pages.setCurrentIndex(index)
@@ -860,14 +1007,13 @@ class AegisApp(QWidget):
     def disconnect_telemetry(self, status="Desconectado • pressione Iniciar"):
         """Fecha a leitura (usado quando a leitura RTDE falha)."""
         source, self.telemetry_source = self.telemetry_source, None
-        if source is not None:
-            source.close()
         self.telemetry_status.setText(status)
+        self._set_level(self.telemetry_status, "info")
         for source_label in self.source_labels:
             source_label.setText("Sem leitura • pressione Iniciar")
-        for status_label in self.status_labels:
-            status_label.setText("Movimento: parado")
-        self.add_log("Telemetria RTDE desconectada")
+        if source is not None:
+            source.close()
+            self.add_log("Telemetria RTDE desconectada")
 
     def update_from_telemetry(self):
         """Atualiza a interface com uma fonte RTDE somente de leitura."""
@@ -891,13 +1037,21 @@ class AegisApp(QWidget):
         super().closeEvent(event)
 
     def refresh_values(self):
+        real = self.telemetry_source is not None
         for name, position in self.positions.items():
             for index, value in enumerate(position):
-                formatted = f"{value:.1f}" if index < 3 else f"{value:.3f}"
+                if not real:
+                    formatted = "—"  # sem leitura: nunca mostrar números de exemplo
+                else:
+                    formatted = f"{value:.1f}" if index < 3 else f"{value:.3f}"
                 self.values[(name, index)].setText(formatted)
 
     def refresh_monitor(self):
         if not self.monitor_values:
+            return
+        if self.telemetry_source is None:
+            for value_label in self.monitor_values.values():
+                value_label.setText("—")
             return
         for name in self.positions:
             for index, value in enumerate(self.joint_angles[name]):
@@ -931,16 +1085,34 @@ class AegisApp(QWidget):
             self.focus_overlay.raise_()
         if hasattr(self, "robot_row"):
             narrow = self.width() < 930
-            direction = QVBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight
-            self.robot_row.setDirection(direction)
-            self.monitor_row.setDirection(direction)
-            if hasattr(self, "visual_row"):
-                self.visual_row.setDirection(direction)
-            if hasattr(self, "camera_row"):
-                self.camera_row.setDirection(direction)
-            if hasattr(self, "operation_controls"):
-                self.operation_controls.setDirection(direction)
             self.sidebar.setFixedWidth(170 if narrow else 222)
+            # Largura útil da página (janela menos barra lateral e margens).
+            content = self.width() - self.sidebar.width() - 70
+
+            def empilhar(row, largura_minima):
+                vertical = content < largura_minima
+                direcao = QVBoxLayout.TopToBottom if vertical else QHBoxLayout.LeftToRight
+                if row.direction() == direcao:
+                    return
+                row.setDirection(direcao)
+                # Recalcula o tamanho mínimo do card e de todos os pais
+                # (abas, divisória, página), senão a rolagem horizontal fica.
+                dono = row.parentWidget()
+                while dono is not None and dono is not self:
+                    if dono.layout() is not None:
+                        dono.layout().invalidate()
+                    dono.updateGeometry()
+                    dono = dono.parentWidget()
+
+            # Cada linha empilha quando seus itens lado a lado não cabem mais.
+            empilhar(self.robot_row, 760)
+            empilhar(self.monitor_row, 760)
+            if hasattr(self, "visual_row"):
+                empilhar(self.visual_row, 720)
+            if hasattr(self, "camera_row"):
+                empilhar(self.camera_row, 980)
+            if hasattr(self, "operation_controls"):
+                empilhar(self.operation_controls, 560)
 
 
 if __name__ == "__main__":
